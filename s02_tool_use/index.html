@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s02: Tool Use — 加一个工具，循环一行都不用改</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s02-tool-use-加一个工具循环一行都不用改">s02: Tool Use — 加一个工具，循环一行都不用改</h1>
+<blockquote><em>&quot;加工具不是改循环，而是注册一个 handler + 一份 schema。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s01_agent_loop/index.html">回合循环</a> → <strong>工具与分发</strong> → <a href="../s03_apply_patch/index.html">apply_patch</a></p>
+<hr>
+<h2 id="先把思想说透为什么加一个工具循环却一行都不用动">先把思想说透：为什么加一个工具，循环却一行都不用动</h2>
+<p>s01 想通了一件事：agent 的内核就是一个循环，<strong>模型出主意、循环跑腿</strong>。那么很自然的下一个问题是——agent 要会的事情越来越多（读文件、写文件、列目录、改代码、搜网页……），这些&quot;会的事情&quot;是加在哪里的？是不是每加一样，那个循环就得改一次、越变越臃肿？</p>
+<p>答案出乎意料：<strong>循环永远不动。</strong> 想通这一点，靠下面两个递进的道理。</p>
+<p><strong>道理一：模型并不&quot;拥有&quot;任何能力，它只会&quot;喊名字&quot;。</strong> 回到 s01 的画面：模型像个只能写纸条的顾问。它写下&quot;我要读 <code>config.py</code> 这个文件&quot;——但它读不了，它只是<strong>喊出了一个意图</strong>。真正能去读文件的，是我们这边的一小段 Python 代码。换句话说，模型那一侧永远只有一件事：<strong>说出&quot;我想用哪个工具、给什么参数&quot;</strong>；至于这个工具到底能不能用、怎么实现的，全在我们手里。模型喊的是名字，干活的是我们。</p>
+<p><strong>道理二：既然模型只是&quot;喊名字&quot;，那&quot;认领名字的人&quot;用一张表就够了。</strong> 模型喊 <code>read_file</code>，谁来接？最笨也最对的办法，就是一本<strong>电话簿</strong>：名字 → 对应的人（函数）。模型喊 <code>read_file</code>，循环翻到 <code>read_file</code> 这一页，找到 <code>run_read_file</code> 这个函数，照它给的参数拨过去。喊 <code>write_file</code> 就翻到 <code>write_file</code> 那页。这本电话簿，就是<strong>分发映射</strong>（一个 <code>name → handler</code> 的字典）。</p>
+<p>于是关键的洞察来了：<strong>循环要做的事，从头到尾只有&quot;查电话簿、照着拨&quot;这一个动作——它根本不在乎簿子里有 1 个名字还是 100 个名字。</strong> 加一项新能力，等于往电话簿里<strong>多抄一行</strong>（再把这个新名字告诉模型，让它知道有这号人可喊）。循环那句&quot;查簿子→拨号&quot;压根不用碰。这就是为什么 s01 那十几行 <code>run_turn</code>，到本章一个字都不会改。</p>
+<p>打个比方：循环像公司前台，只会&quot;按访客报的部门名转接电话&quot;。今天公司新开了个&quot;法务部&quot;，前台要改工作方式吗？不用——只要在转接表上加一行&quot;法务部 → 305 房间&quot;就行。前台的动作永远是同一个。<strong>模型是访客，工具是各个部门，循环是那个永远只会转接的前台。</strong> 全课程几十种能力，都是往这张转接表上一行行加出来的；前台（循环）始终是 s01 那一个。</p>
+<h2 id="问题">问题</h2>
+<p>s01 的 agent 只有一个工具：<code>shell</code>。它已经&quot;图灵完备&quot;了——读文件 <code>cat</code>、写文件 <code>echo &gt; file</code>、列目录 <code>ls</code>，理论上 shell 全能干。</p>
+<p>但全用 shell 有两个现实问题：</p>
+<ol><li><strong>又丑又脆</strong>。&quot;读这个文件的前 20 行&quot;要拼 <code>sed -n &#x27;1,20p&#x27;</code>，跨平台还不一定对；写多行文件要跟 here-doc、转义、引号搏斗。</li><li><strong>不可观测</strong>。前端（TUI / IDE）拿到的只是一坨 <code>stdout</code>，它分不清这次模型是在&quot;读文件&quot;还是在&quot;删库&quot;——没有结构化的语义。</li></ol>
+<p>所以哪怕主力是 shell，我们也想给模型几个<strong>第一类工具</strong>：<code>read_file</code>、<code>write_file</code>、<code>list_dir</code>。问题来了——<strong>每加一个工具，回合循环要不要跟着改？</strong></p>
+<h2 id="解决方案">解决方案</h2>
+<p>不用。这一章的全部重点就一句话：</p>
+<blockquote><strong>循环不动。加一个工具 = 往「分发映射」加一行 handler + 往工具清单加一份 schema。</strong></blockquote>
+<p>s01 的循环里本来就有一句 <code>HANDLERS.get(tc.name)</code>——它早就是按名字查表分发的。我们要做的只是把那张表填厚。</p>
+<pre><code>   模型回合产出 tool_call(name, arguments)
+                  │
+                  ▼
+        TOOL_HANDLERS.get(name)   ← 唯一的&quot;扩展点&quot;：一张 name→handler 的字典
+          ┌───────┼───────┬────────────┐
+          ▼       ▼       ▼            ▼
+        shell  read_file write_file  list_dir   ← 加工具就在这里加一行
+          │       │       │            │
+          └───────┴───────┴────────────┘
+                  │
+          function_call_output 回灌 → 继续循环（run_turn 一字未改）</code></pre>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>。<code># FROM s01（搬运）</code> 横幅下是<strong>原封不动</strong>的 <code>run_shell</code> 和 <code>run_turn</code>；<code># NEW in s02</code> 横幅下才是新增的东西。</p>
+<p><strong>第 1 步</strong> — 写新工具的实现。每个都套一层 <code>safe_path</code> 把路径锚定在工作区内：</p>
+<pre><code class="language-python">def safe_path(p: str) -&gt; Path:
+    path = (WORKDIR / p).resolve()
+    if not path.is_relative_to(WORKDIR):
+        raise ValueError(f&quot;path escapes workspace: {p}&quot;)
+    return path</code></pre>
+<p><strong>第 2 步</strong> — 把工具登记进<strong>分发映射</strong>和<strong>工具清单</strong>（schema 是扁平的 Responses API 形状）：</p>
+<pre><code class="language-python">TOOL_HANDLERS = {&quot;shell&quot;: run_shell, &quot;read_file&quot;: run_read_file,
+                 &quot;write_file&quot;: run_write_file, &quot;list_dir&quot;: run_list_dir}
+TOOLS = [{&quot;name&quot;: &quot;read_file&quot;, &quot;description&quot;: &quot;...&quot;,
+          &quot;parameters&quot;: {&quot;type&quot;: &quot;object&quot;, &quot;properties&quot;: {...}, &quot;required&quot;: [&quot;path&quot;]}}, ...]</code></pre>
+<p><strong>第 3 步</strong> — 循环照旧。<code>run_turn</code> 里查表分发的那一行，和 s01 逐字相同：</p>
+<pre><code class="language-python">handler = TOOL_HANDLERS.get(tc.name)
+output = handler(**tc.arguments) if handler else f&quot;unknown tool: {tc.name}&quot;
+messages.append(tool_output_item(tc.call_id, output))</code></pre>
+<p>这正是真 Codex 的结构。core 里有一个 <a href="../../codex/codex-rs/core/src/tools/registry.rs"><code>ToolRegistry</code></a>（<code>HashMap&lt;ToolName, Arc&lt;dyn CoreToolRuntime&gt;&gt;</code>），它的 <code>dispatch_any</code> 就是按名字查表、找到对应 handler、调用 <code>handle()</code>——和我们的 <code>TOOL_HANDLERS.get(name)</code> 一脉相承，只是外面包了一圈 hook / 遥测 / 沙箱标签。而 <a href="../../codex/codex-rs/tools/src/tool_spec.rs"><code>create_tools_json_for_responses_api</code></a>（<code>tools/src/tool_spec.rs:78</code>）负责把每个工具序列化成发给模型的扁平 JSON——对应我们 <code>create_tools_json</code> 那一行。</p>
+<p><strong>走一遍</strong> — 把&quot;加工具循环不变&quot;这句话坐实。假设模型这回合想写文件，它喊出来的纸条长这样（和 s01 那张 <code>shell</code> 纸条<strong>形状完全一样</strong>，只是 <code>name</code> 换了、<code>arguments</code> 里的字段换了）：</p>
+<pre><code class="language-json">{&quot;type&quot;: &quot;function_call&quot;, &quot;call_id&quot;: &quot;call_7&quot;, &quot;name&quot;: &quot;write_file&quot;,
+ &quot;arguments&quot;: &quot;{\&quot;path\&quot;: \&quot;hello.txt\&quot;, \&quot;content\&quot;: \&quot;hi\\n\&quot;}&quot;}</code></pre>
+<p>循环拿到它，做的还是 s01 那一个动作——查表、照着拨：</p>
+<ol><li><strong>查电话簿</strong>：<code>TOOL_HANDLERS.get(&quot;write_file&quot;)</code> → 取到 <code>run_write_file</code> 函数。（在 s01 里这张表只有 <code>shell</code> 一项；现在它有四项——但 <code>.get(name)</code> 这句代码一字未变。）</li><li><strong>照参数拨号</strong>：<code>run_write_file(path=&quot;hello.txt&quot;, content=&quot;hi\n&quot;)</code>，真的把文件写到工作区，返回 <code>&quot;wrote 3 bytes to hello.txt&quot;</code>。</li><li><strong>结果按 <code>call_id</code> 贴回去</strong>，包成和 s01 一模一样的 <code>function_call_output</code> 项：</li></ol>
+<pre><code class="language-json">   {&quot;type&quot;: &quot;function_call_output&quot;, &quot;call_id&quot;: &quot;call_7&quot;, &quot;output&quot;: &quot;wrote 3 bytes to hello.txt&quot;}</code></pre>
+<ol><li>带着更长的历史再问模型，继续循环。</li></ol>
+<p>注意第 1~3 步：<strong>这正是 s01 <code>run_turn</code> 里那三行</strong>，逐字相同（去 <a href="code.py">code.py</a> 里对一下 <code># FROM s01（搬运）</code> 横幅下那段）。我们这一章新增的所有东西——<code>run_write_file</code> 的实现、<code>TOOL_HANDLERS</code> 里多出来的几行、<code>TOOLS</code> 里多出来的几份 schema——<strong>全都在循环之外</strong>。循环只是多了几个可以查到的名字而已。这就是上面&quot;道理二&quot;的活样板。</p>
+<p><code>--demo</code> 把这件事单独拎出来给你看：它不碰模型，直接调 <code>TOOL_HANDLERS[name](**kwargs)</code>——和 <code>run_turn</code> 里第 2 步那次&quot;拨号&quot;是<strong>同一个动作</strong>——在 <code>_demo_workspace/</code> 下 write→read→list，再演示一次越界写入被 <code>safe_path</code> 拦截，最后清理目录。你会在输出里看到那行 <code>&gt; write_file {&#x27;path&#x27;: ...}</code>，正对应上面那张纸条。</p>
+<h2 id="生产级schema-怎么编码harness-怎么守住它llm-出错怎么办">生产级：schema 怎么编码、harness 怎么守住它、LLM 出错怎么办</h2>
+<p>循环和分发通了——但一个<strong>能上生产</strong>的工具系统，难点根本不在&quot;调对工具&quot;，而在&quot;模型调<strong>错</strong>时怎么办&quot;。模型会漏填参数、填错类型、甚至喊一个根本不存在的工具名。玩具会当场崩；生产级 harness 必须把这些全接住。这一节把三件事讲到能经得起检验。</p>
+<h3 id="一schema-怎么编码它不是注释是唯一的护栏-提示词">一、schema 怎么编码：它不是注释，是<strong>唯一的护栏 + 提示词</strong></h3>
+<p>工具的 <code>parameters</code> 是一份 <strong>JSON Schema</strong>。它干的两件事都远超&quot;文档&quot;：</p>
+<ul><li><strong>对模型</strong>：字段名和 <code>description</code> 是模型决定&quot;怎么调&quot;的<strong>唯一依据</strong>——它本身就是提示词工程。<code>{&quot;type&quot;:&quot;integer&quot;}</code>、<code>{&quot;enum&quot;:[...]}</code>、<code>required</code> 把模型能填的东西收窄；写得含糊，模型就乱填。</li><li><strong>对 harness</strong>：schema 是你<strong>校验</strong>模型输出的标尺（见第三节）。</li></ul>
+<p>真 Codex 不手写 JSON 字符串拼 schema，而是用一个<strong>有类型的 <code>JsonSchema</code> 结构</strong>（<a href="../../codex/codex-rs/tools/src/json_schema.rs"><code>tools/src/json_schema.rs:38</code></a>）：</p>
+<pre><code class="language-rust">pub struct JsonSchema {
+    pub schema_type: Option&lt;JsonSchemaType&gt;,       // &quot;type&quot;
+    pub description: Option&lt;String&gt;,
+    pub enum_values: Option&lt;Vec&lt;JsonValue&gt;&gt;,        // &quot;enum&quot;
+    pub items: Option&lt;Box&lt;JsonSchema&gt;&gt;,             // 数组元素
+    pub properties: Option&lt;BTreeMap&lt;String, JsonSchema&gt;&gt;,
+    pub required: Option&lt;Vec&lt;String&gt;&gt;,
+    pub additional_properties: Option&lt;AdditionalProperties&gt;,
+    pub any_of: Option&lt;Vec&lt;JsonSchema&gt;&gt;,            // 联合类型 / 可空
+    // ...
+}</code></pre>
+<p>每个工具是一个 <code>ResponsesApiTool { name, description, strict: bool, parameters: JsonSchema }</code>（<a href="../../codex/codex-rs/tools/src/responses_api.rs"><code>responses_api.rs:26</code></a>），再由 <code>ToolSpec</code> 这个 <code>#[serde(tag=&quot;type&quot;)]</code> 枚举序列化成 <code>{&quot;type&quot;:&quot;function&quot;, ...}</code> 发给模型。<strong>关键：schema 是代码里的类型，不是散落的字符串</strong>——这正是下面&quot;不漂移&quot;的地基。</p>
+<h3 id="二strict-模式让模型根本吐不出非法参数">二、strict 模式：让模型<strong>根本吐不出</strong>非法参数</h3>
+<p><code>ResponsesApiTool</code> 有个 <code>strict: bool</code>。设成 <code>true</code>，就是 OpenAI 的 <strong>strict function calling</strong>：API 用<strong>受约束解码</strong>保证模型吐出的参数一定符合 schema（缺必填、错类型在<strong>生成阶段</strong>就被挡掉，根本到不了你手上）。代价写在源码注释里（<code>responses_api.rs:29</code>）：</p>
+<blockquote><em>当 strict=true 时，JSON schema 的 <code>required</code> 与 <code>additional_properties</code> 必须齐全；<code>properties</code> 里<strong>每个</strong>字段都必须出现在 <code>required</code> 里。</em></blockquote>
+<p>也就是 strict 不许&quot;可选字段&quot;（要可选只能写成 <code>anyOf:[T, null]</code>）。Codex 这些内置工具目前默认 <code>strict: false</code>，把灵活性留下、改用<strong>运行时校验</strong>兜底（第三节）——这是个真实的工程权衡：<strong>strict = 生成期就挡住，但 schema 必须写死、无可选字段；不 strict = schema 灵活，但你必须自己在 harness 里验。</strong></p>
+<blockquote>还有一层<strong>防御性规整</strong>：OpenAI 模型要求 schema 必须带 <code>properties</code>，可有些 MCP 服务器偏不给。Codex 在 <a href="../../codex/codex-rs/tools/src/mcp_tool.rs"><code>mcp_tool.rs</code></a> 里一发现缺了就<strong>塞一个空 <code>{}</code> 进去</strong>——接第三方工具时，你不能假设对方的 schema 是干净的。</blockquote>
+<h3 id="三防-llm-出错不是别让它错而是错了能回灌能改">三、防 LLM 出错：不是&quot;别让它错&quot;，而是&quot;错了能回灌、能改&quot;</h3>
+<p>这是整节的题眼，也是玩具与生产的分水岭。看真 Codex 怎么解析一次工具调用的参数（<a href="../../codex/codex-rs/core/src/tools/handlers/mod.rs"><code>handlers/mod.rs:72</code></a>）：</p>
+<pre><code class="language-rust">fn parse_arguments&lt;T: for&lt;&#x27;de&gt; Deserialize&lt;&#x27;de&gt;&gt;(arguments: &amp;str)
+    -&gt; Result&lt;T, FunctionCallError&gt; {
+    serde_json::from_str(arguments).map_err(|err| {
+        FunctionCallError::RespondToModel(format!(&quot;failed to parse function arguments: {err}&quot;))
+    })
+}</code></pre>
+<p>两个生产级要点：</p>
+<ol><li><strong>反序列化进一个有类型的结构体 <code>T</code></strong>：schema 发给模型、<code>T</code> 用来接收——<strong>两者同源</strong>，所以&quot;schema 说有字段 X、代码却读字段 Y&quot;这种漂移不会发生。这就是&quot;harness 怎么维护 schema&quot;的答案：<strong>别让 schema 和解析各写一份，让它们出自同一个类型。</strong></li><li><strong>失败不 panic，而是 <code>RespondToModel(错误信息)</code></strong>：错误会作为这次工具调用的<strong>结果回灌给模型</strong>，模型下一轮看到&quot;参数错在哪&quot;就能自己改。</li></ol>
+<p>而错误只分两类（<a href="../../codex/codex-rs/tools/src/function_call_error.rs"><code>function_call_error.rs</code></a>）——这个二分法就是生产级错误处理的全部哲学：</p>
+<table><thead><tr><th>变体</th><th>含义</th><th>怎么处理</th></tr></thead><tbody><tr><td><code>RespondToModel(String)</code></td><td><strong>可恢复</strong>：模型自己能改（参数错、工具名错、命令失败…）</td><td>把错误当工具结果回灌，循环继续，模型重试</td></tr><tr><td><code>Fatal(String)</code></td><td><strong>不可恢复</strong>：harness 自己坏了（崩溃、不变量被破坏）</td><td>中止整个回合</td></tr></tbody></table>
+<blockquote>一句话：<strong>生产级 harness 假设模型一定会出错，于是把&quot;出错&quot;做成一条普通的、可恢复的回灌路径，而不是一个异常。</strong> 模型是唯一能修正自己错误的人——所以把错误还给它。</blockquote>
+<p>本章 <a href="code.py">code.py</a> 把这套搬成了一个 <code>dispatch_tool</code> 层（夹在循环和工具之间，正是真 Codex <code>ToolRouter</code> 的位置）：<strong>未知工具 → 错误串；参数不合 schema（缺必填 / 多字段 / 类型错）→ 错误串；handler 抛异常 → 错误串</strong>——全都回灌、绝不崩进程。注意&quot;循环&quot;本身职责没变（拿结果→回灌），校验与纠错都在 dispatch 这一层。<code>--demo</code> 末尾专门喂四种错误调用，给你看它怎么接住（以下是<strong>真实输出</strong>）：</p>
+<pre><code>&gt; read_file {}
+  ERROR: invalid arguments for `read_file`: missing required field(s) [&#x27;path&#x27;]
+&gt; write_file {&#x27;path&#x27;: &#x27;x.txt&#x27;, &#x27;content&#x27;: 123}
+  ERROR: invalid arguments for `write_file`: field `content` should be string, got int
+&gt; read_file {&#x27;path&#x27;: &#x27;a.txt&#x27;, &#x27;lines&#x27;: 5}
+  ERROR: invalid arguments for `read_file`: unexpected field `lines` (allowed: [&#x27;limit&#x27;, &#x27;path&#x27;])
+&gt; search_web {&#x27;q&#x27;: &#x27;codex harness&#x27;}
+  ERROR: unknown tool `search_web` (available: [&#x27;list_dir&#x27;, &#x27;read_file&#x27;, &#x27;shell&#x27;, &#x27;write_file&#x27;])</code></pre>
+<p>每一条都是&quot;会回灌给模型、让它下一轮改对&quot;的反馈，而不是一个 traceback。<strong>这一步，就是把 s02 从「能调通」抬到「生产级」的那道坎。</strong></p>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th><th>为什么</th></tr></thead><tbody><tr><td>第一类工具数量</td><td><strong>多</strong>：Read / Write / Edit / Glob / Grep / Bash / …</td><td><strong>少</strong>：shell + apply_patch 几乎包办一切</td><td>Codex 赌 shell+apply_patch 的<strong>通用性</strong>；Claude 赌<strong>好用、可观测的专用工具</strong></td></tr><tr><td>工具 schema 形状</td><td><code>{name, description, input_schema}</code></td><td><code>{type:&quot;function&quot;, name, description, parameters}</code>（扁平）</td><td>跟各家 wire API 走：Anthropic Messages vs OpenAI Responses</td></tr><tr><td>越界写防护</td><td>工具代码里的路径校验（应用层）</td><td>教学版同样用 <code>safe_path</code>，但真身<strong>主要靠内核沙箱</strong>（<a href="../s05_sandbox/index.html">s05</a>）</td><td>自主运行场景下，应用层护栏不够，要内核兜底</td></tr><tr><td>加工具的代价</td><td>注册 handler + schema，循环不改</td><td>注册 handler + schema，循环不改</td><td><strong>两边相同</strong>——这就是本章的真正主角</td></tr><tr><td>工具太多装不下</td><td><strong>ToolSearch</strong>：一个&quot;找工具的工具&quot;——海量工具先&quot;延迟&quot;、只留名字，模型按需搜出 schema 再用</td><td><strong>延迟暴露 + <code>ToolSearchCall</code>/<code>ToolSearchOutput</code> item</strong>：MCP 工具超阈值（100）就不直接进 prompt，改由模型搜索发现</td><td>同一问题（几百个工具撑爆上下文）、同一思路（按需发现）；Codex 把它做成<strong>协议 item</strong>、并绑在 MCP 规模上 → 见深入五</td></tr></tbody></table>
+<p><strong>为什么 Codex 工具这么少？</strong> 因为<strong>模型差异直接决定工具差异</strong>。Codex 的训练把宝押在两件武器上：一个能跑任意命令的 <code>shell</code>，一个能精确改文件的 <code>apply_patch</code>（<a href="../s03_apply_patch/index.html">s03</a>）。模型被教会用这两样东西&quot;自己想办法&quot;——要搜代码就 <code>grep</code>，要看文件就 <code>sed</code>/<code>cat</code>。Claude Code 则反过来，给模型一柜子做工精细的专用工具（每个都有清晰 schema、结构化输出、可被 UI 渲染），让模型少拼命令、多调接口。没有谁对谁错——这是&quot;通用 shell 的灵活&quot;对&quot;专用工具的可控、可观测&quot;的不同下注。</p>
+<blockquote>一句话：<strong>工具的多寡与形状，是两家&quot;模型能力假设 + wire 协议&quot;共同投下的影子。</strong></blockquote>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<details>
+<summary>一、TOOL_HANDLERS 字典 vs 真 ToolRegistry</summary>
+<p>教学版的&quot;分发映射&quot;就是一个 <code>dict[str, callable]</code>，<code>run_turn</code> 里一句 <code>TOOL_HANDLERS.get(tc.name)</code> 完成分发。真 Codex 的 <a href="../../codex/codex-rs/core/src/tools/registry.rs"><code>registry.rs</code></a> 把同一件事做成了类型化的运行时契约：</p>
+<pre><code class="language-rust">pub struct ToolRegistry {
+    tools: HashMap&lt;ToolName, Arc&lt;dyn CoreToolRuntime&gt;&gt;,
+}
+// dispatch_any_with_terminal_outcome(...) ：按名字取出 tool，再 tool.handle(invocation)</code></pre>
+<p><code>self.tool(&amp;tool_name)</code> 取不到就回 <code>unsupported call: &lt;name&gt;</code>——和我们 <code>else f&quot;unknown tool&quot;</code> 同义。差别全在它额外做的事：取不到工具时记一条遥测、跑 PreToolUse/PostToolUse hook（<a href="../s13_hooks/index.html">s13</a>）、给结果打沙箱/策略标签、把&quot;工具开始/结束&quot;通过 lifecycle 事件广播出去。</p>
+<table><thead><tr><th></th><th>教学版</th><th>真 codex-rs</th></tr></thead><tbody><tr><td>表</td><td><code>dict[str, fn]</code></td><td><code>HashMap&lt;ToolName, Arc&lt;dyn CoreToolRuntime&gt;&gt;</code></td></tr><tr><td>分发</td><td><code>TOOL_HANDLERS.get(name)</code></td><td><code>ToolRegistry::dispatch_any</code></td></tr><tr><td>handler 形态</td><td>普通函数</td><td>实现 <code>ToolExecutor</code>/<code>CoreToolRuntime</code> trait 的结构体</td></tr><tr><td>取不到时</td><td><code>&quot;unknown tool: …&quot;</code></td><td><code>FunctionCallError::RespondToModel(&quot;unsupported call …&quot;)</code></td></tr></tbody></table>
+<p>核心是一样的：<strong>一张按名字查的表</strong>。生产版多出来的几百行，全是 hook、遥测、沙箱、并行调度这些&quot;保护与可观测&quot;机制。</p>
+</details>
+<details>
+<summary>二、扁平 schema 与 create_tools_json_for_responses_api</summary>
+<p>教学版的 <code>create_tools_json</code> 就一行：给每个工具加个 <code>{&quot;type&quot;:&quot;function&quot;, ...}</code>。真源码 <code>tools/src/tool_spec.rs:78</code> 的 <code>create_tools_json_for_responses_api</code> 做的是同一件事——把一组 <code>ToolSpec</code> 逐个 <code>serde_json::to_value</code> 序列化：</p>
+<pre><code class="language-rust">pub fn create_tools_json_for_responses_api(tools: &amp;[ToolSpec])
+    -&gt; Result&lt;Vec&lt;Value&gt;, serde_json::Error&gt; {
+    tools.iter().map(serde_json::to_value).collect()
+}</code></pre>
+<p>关键在 <code>ToolSpec</code> 这个枚举用 <code>#[serde(tag = &quot;type&quot;)]</code> 标了五个变体：<code>Function</code> / <code>Namespace</code> / <code>ToolSearch</code> / <code>ImageGeneration</code> / <code>WebSearch</code> / <code>Freeform(custom)</code>。也就是说&quot;工具&quot;不止&quot;函数&quot;一种——<code>web_search</code>、<code>image_generation</code> 是<strong>宿主托管的特殊 type</strong>（<a href="../s12_tools_extra/index.html">s12</a> 会碰到 <code>web_search</code>）。我们的 read/write/list 都属于最普通的 <code>Function</code> 变体，序列化出来正是 <code>{&quot;type&quot;:&quot;function&quot;,&quot;name&quot;:...,&quot;parameters&quot;:...}</code>。</p>
+</details>
+<details>
+<summary>三、真 shell 工具远不止「一个 command 字符串」</summary>
+<p>我们的 <code>run_shell(command: str)</code> 收一个字符串、<code>subprocess.run(shell=True)</code>。真 Codex 的 shell（<a href="../../codex/codex-rs/core/src/tools/handlers/shell.rs"><code>handlers/shell.rs</code></a>）收的是结构化得多的参数：argv 数组（不是拼字符串）、<code>timeout_ms</code>、<code>cwd</code>、网络策略、<code>sandbox_permissions</code>/<code>additional_permissions</code>，还要先经过 <code>create_exec_approval_requirement_for_command</code> 决定要不要弹审批，再交给 <code>ShellRuntime</code> + <code>ToolOrchestrator</code> 在沙箱里跑，前后各发一个 <code>ToolEmitter::begin/finish</code> 事件。</p>
+<p>它甚至会先 <code>intercept_apply_patch</code>——如果发现这条 shell 命令其实是个 apply_patch，就改走补丁通道。换句话说真身的 shell 是&quot;带审批、带沙箱、带事件、还能识别 apply_patch&quot;的复合工具。教学版把这些全剥掉，只留&quot;跑命令拿输出&quot;的内核，让你看清分发本身。</p>
+</details>
+<details>
+<summary>四、safe_path 应用层护栏 vs 内核沙箱</summary>
+<p>我们给 read/write/list 套了 <code>safe_path</code>：把路径 resolve 后检查 <code>is_relative_to(WORKDIR)</code>，越界抛错。这是<strong>应用层</strong>的护栏——和 learn-claude-code 同款。它够教学，但有个根本弱点：<strong>它只拦住&quot;经过我这个函数&quot;的路径</strong>。模型完全可以让 <code>shell</code> 跑一句 <code>python -c &quot;open(&#x27;/etc/passwd&#x27;)&quot;</code>，绕开 <code>safe_path</code>。</p>
+<p>真 Codex 不把安全寄托在工具代码的路径检查上，而是下沉到内核：macOS Seatbelt 的 <code>(deny default)</code> + 可写根白名单，Linux 的 Landlock+seccomp（<a href="../s05_sandbox/index.html">s05</a>）。哪怕模型用任意子进程去写工作区外，内核直接拒绝。这正是全课程主线的第一次显形：<strong>Claude Code 在应用层&quot;挡&quot;，Codex 在内核层&quot;关&quot;。</strong> 本章的 <code>safe_path</code> 是&quot;挡&quot;的味道；它真正的归宿在 s05。</p>
+</details>
+<details>
+<summary>五、工具一多就装不下：ToolSearch（CC）vs 延迟暴露（Codex）</summary>
+<p>到 <a href="../s15_mcp/index.html">s15</a> 你会接上 MCP——一个 MCP 服务器可能甩给你<strong>几百个工具</strong>。要是把它们的 schema 全塞进每次请求，上下文窗口光是工具定义就被吃光了（活还没干，地方先没了）。两家都用同一个思路解决：<strong>别全摊开，让模型按需&quot;找工具&quot;。</strong></p>
+<p><strong>Claude Code：<code>ToolSearch</code> 是一个&quot;找工具的工具&quot;。</strong> 海量工具被标成<strong>延迟（deferred）</strong>——一开始只把<strong>名字</strong>给模型，schema 先不加载。模型想用时，先调 <code>ToolSearch</code>（传一个查询词），harness 返回匹配工具的完整 schema，模型这才&quot;看得见&quot;并调用它。一句话：<strong>把&quot;加载工具定义&quot;本身变成一次工具调用。</strong></p>
+<p><strong>Codex：同一个思路，做成协议里的&quot;延迟暴露 + ToolSearch item&quot;。</strong> 看 <a href="../../codex/codex-rs/core/src/mcp_tool_exposure.rs"><code>core/src/mcp_tool_exposure.rs</code></a>：</p>
+<pre><code class="language-rust">pub(crate) const DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD: usize = 100;
+
+let should_defer = search_tool_enabled
+    &amp;&amp; (config.features.enabled(Feature::ToolSearchAlwaysDeferMcpTools)
+        || deferred_tools.len() &gt;= DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD);</code></pre>
+<p>逻辑很直白：<strong>MCP 工具不到 100 个就直接暴露（<code>direct_tools</code>）；一旦 ≥ 100（或特性开关强制），就改成&quot;延迟暴露&quot;（<code>deferred_tools</code>）——不进 prompt，等模型来搜。</strong> 而&quot;模型搜了一次工具&quot;在 Codex 里是<strong>第一类协议 item</strong>：<code>ResponseItem::ToolSearchCall</code> / <code>ToolSearchOutput</code>（<code>core/src/turn_timing.rs</code>）——和 <code>function_call</code>、<code>reasoning</code> 一样摊在那张扁平 item 列表里。还记得深入二里 <code>ToolSpec</code> 枚举那六个变体吗？其中就有一个 <code>ToolSearch</code>——它本就是 Codex 工具体系里的一等公民。</p>
+<p><strong>异同：</strong></p>
+<ul><li><strong>同</strong>：都为治&quot;工具太多撑爆上下文&quot;，都用&quot;延迟 + 按需发现&quot;，都把&quot;找工具&quot;做成模型的一次调用。</li><li><strong>异</strong>：CC 的 <code>ToolSearch</code> 是一个<strong>通用、显眼的元工具</strong>（任何延迟工具都走它）；Codex 把它<strong>绑在 MCP-at-scale</strong>（阈值 100 + 特性开关），并按一贯气质做成<strong>协议 item</strong>（<code>ToolSearchCall</code>/<code>ToolSearchOutput</code>，于是天然进 rollout、可审计）——又一次&quot;CC 放应用层、Codex 放进协议&quot;。</li></ul>
+<blockquote>呼应本章主线：循环依然不动。&quot;工具太多&quot;从来不是循环的问题，而是<strong>怎么把工具清单交给模型</strong>的问题——无非在模型喊名字之前，先让它去&quot;查一次号台&quot;。循环那句&quot;查电话簿→拨号&quot;照旧。</blockquote>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s02_tool_use/code.py --demo   # 离线：走分发映射跑 write/read/list + 演示越界拦截
+python s02_tool_use/code.py          # 交互模式（mock 后端，无需 key）</code></pre>
+<p><code>--demo</code> 会在当前目录建临时 <code>_demo_workspace/</code>，跑完自动删除，不留痕迹。</p>
+<h2 id="小结">小结</h2>
+<ul><li>加一个工具 = 注册一个 handler（进分发映射）+ 一份工具 schema。<strong>回合循环一行都不用改。</strong></li><li>真 Codex 用 <code>ToolRegistry</code> + <code>dispatch_any</code> 做同一件事，外面再裹 hook / 遥测 / 沙箱 / 事件。</li><li>Codex 第一类工具<strong>少</strong>（shell + apply_patch 包打天下），Claude Code <strong>多</strong>——这是两家&quot;模型能力假设 + wire 协议&quot;共同的影子。</li><li>教学版的 <code>safe_path</code> 是应用层护栏；它真正的归宿是内核沙箱（<a href="../s05_sandbox/index.html">s05</a>）。</li><li>工具一多就装不下：两家都&quot;延迟 + 按需找工具&quot;——CC 用 <code>ToolSearch</code> 元工具，Codex 用延迟暴露（阈值 100）+ <code>ToolSearchCall</code> item（见深入五）。</li><li><strong>生产级</strong>：难点不在&quot;调对工具&quot;，而在&quot;调错了能恢复&quot;。schema 既是给模型的提示词、又是 harness 的校验标尺（且要与解析目标<strong>同源、不漂移</strong>）；出错走 <code>RespondToModel</code> 回灌让模型自己改，而非崩进程——校验/兜错都在循环与工具之间的 dispatch 层（见「生产级」一节）。</li><li>下一站 <a href="../s03_apply_patch/index.html">s03</a>：Codex 改文件的招牌工具 <code>apply_patch</code>——为什么不用 <code>write_file</code> 整文件覆盖？</li></ul>
+<h2 id="思考">思考</h2>
+<ul><li>既然 <code>shell</code> 理论上能 <code>cat</code>/<code>echo &gt;</code>/<code>ls</code>，为什么还要单独给模型 <code>read_file</code>/<code>write_file</code>/<code>list_dir</code>？这几个专用工具到底买到了什么——是给模型省事，还是给<strong>前端</strong>省事？</li><li>Codex 只给 shell + apply_patch 两件武器，靠模型&quot;自己想办法&quot;；Claude Code 给一柜子专用工具。如果让你训练一个新模型，你会押&quot;少而通用&quot;还是&quot;多而专用&quot;？这个选择会怎样反过来约束你的 harness？</li><li>本章的 <code>safe_path</code> 拦得住 <code>write_file(&quot;../x&quot;)</code>，却拦不住 <code>shell(&quot;python -c \&quot;open(&#x27;/etc/passwd&#x27;,&#x27;w&#x27;)\&quot;&quot;)</code>。一个只在应用层做路径检查的 agent，安全边界其实在哪？这是不是正好解释了 Codex 为什么要把防线下沉到内核（<a href="../s05_sandbox/index.html">s05</a>）？</li><li>真 Codex 的 <code>dispatch_any</code> 在调用 handler 前后塞了 PreToolUse/PostToolUse hook 和 Begin/End 事件。如果让你只用教学版这张 <code>dict</code> 去加&quot;每次工具调用前问一句要不要批准&quot;，你会把这段逻辑加在分发映射里，还是加在循环里？为什么？</li><li>当一个 MCP 服务器甩给你 500 个工具，&quot;先搜索再调用&quot;省了上下文，却多走一步、还可能搜不全。你会怎么权衡&quot;全摊开&quot;和&quot;按需找&quot;？那个 100 的阈值，调高调低各有什么代价、该由谁来定？</li><li><code>dispatch_tool</code> 把&quot;参数错 / 工具名错 / handler 崩&quot;都回灌给模型让它重试。可如果模型<strong>反复</strong>用同样的错参数、陷进死循环呢？什么时候该把 <code>RespondToModel</code>（可恢复）升级成 <code>Fatal</code>（中止）？真 Codex 靠回合预算 + 熔断挡住无限重试——想想 s14 那个 <code>MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN</code>，同一个道理该怎么搬到工具重试上？</li></ul>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>超长篇：Claude Code 与 Codex 的「子代理与多智能体」全解</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="超长篇claude-code-与-codex-的子代理与多智能体全解">超长篇：Claude Code 与 Codex 的「子代理与多智能体」全解</h1>
+<blockquote>接着<a href="context-cc-vs-codex.html">上下文那篇</a>，这篇拆另一个大主题：当<strong>一个 agent 不够用</strong>时，两套系统怎么&quot;分身&quot;（subagent）和&quot;组队&quot;（multi-agent）——以及为什么 CC 走向&quot;文件系统里的队友团&quot;，Codex 走向&quot;有身份、有图谱、能上云、能被调用的线程网络&quot;。 事实依据：Codex 来自真源码 <code>../../codex/codex-rs</code>；CC 来自 <a href="../../learn-claude-code/index.html">learn-claude-code</a> 对 <code>AgentTool.tsx</code> / <code>runAgent.ts</code> / <code>forkSubagent.ts</code> / 团队章节的剖析。 ⚠️ <strong>关于论据强度</strong>：Codex 侧每个机制都能对到 <code>codex-rs</code> 的文件/行号；CC 侧的精确数字（如「15 种消息类型」「轮询 Lead 1s / 队友 500ms」「保头几条」）转述自 learn-claude-code 对<strong>闭源</strong> CC 的剖析，<strong>无法在本仓库独立核验</strong>——请按二手材料对待，确定性低于 Codex 侧。</blockquote>
+<p><a href="../index.html">← 返回 learn-codex 总览</a></p>
+<hr>
+<blockquote>🛠 <strong>想动手？</strong> 本篇的可跑骨架是章节 <a href="../s18_multiagent/index.html">s18 多智能体</a>（<code>python s18_multiagent/code.py --demo</code>，离线）——一个最小的带内 <code>AgentMessage</code> + router + 共享 rollout demo，把下面 ★ 那节讲的「带内通信」跑给你看。</blockquote>
+<h2 id="0-给初学者为什么一个-agent-不够">0. 给初学者：为什么一个 agent 不够</h2>
+<p>先分清两个<strong>不同</strong>的需求，它们常被混为一谈：</p>
+<ol><li><strong>子任务隔离（subagent / 分身）</strong>：主 agent 在修 bug，需要先&quot;读 30 个文件搞清调用链&quot;。如果在主对话里读，这 30 个文件的内容会把上下文撑爆、还让它忘了本来要干嘛。解决办法：<strong>开个分身</strong>，给它一张干净的白纸去查，查完<strong>只把结论</strong>带回来，中间过程全扔。就像你修 bug 时&quot;新开一个终端&quot;查资料，查完关掉、只把结论记进笔记。</li></ol>
+<ol><li><strong>多智能体协作（multi-agent / 组队）</strong>：一个大项目，前端、后端、测试可以<strong>并行</strong>推进。这时你想要的不是&quot;分身查个资料&quot;，而是&quot;几个 agent 各司其职、互相通信、协调进度&quot;——一个<strong>团队</strong>。</li></ol>
+<p>这两件事，CC 和 Codex 都做了，但做法差异极大。我们先看&quot;分身&quot;，再看&quot;组队&quot;。</p>
+<hr>
+<h2 id="1-分身subagent把脏活关进一张白纸">1. 分身（Subagent）：把脏活关进一张白纸</h2>
+<h3 id="claude-codetask-工具-全新上下文">Claude Code：<code>task</code> 工具 + 全新上下文</h3>
+<p>CC 的分身是一个叫 <code>task</code> 的工具（真源码 <code>AgentTool.tsx</code> / <code>runAgent.ts</code>）。主 agent 像调用任何工具一样调它，传一句任务描述；harness 就 <strong>spawn 一个子 agent</strong>：</p>
+<ul><li>给它一份<strong>全新的 <code>messages[]</code></strong>（只有那句任务描述），跑自己的循环；</li><li>子 agent 干完，<strong>只把最后的文本结论</strong>回传给主 agent——中间读了什么、聊了多少轮，全部丢弃；</li><li>但<strong>文件系统的副作用保留</strong>（它写的文件、改的代码还在）。</li></ul>
+<p>三个关键设计（learn-cc s06）：</p>
+<table><thead><tr><th>决策</th><th>选择</th><th>为什么</th></tr></thead><tbody><tr><td>上下文隔离</td><td>全新 <code>messages[]</code></td><td>子 agent 的中间过程不污染主对话</td></tr><tr><td>只回传结论</td><td>取最后一条文本</td><td>不回传整个历史</td></tr><tr><td>禁止递归</td><td>子 agent 没有 <code>task</code> 工具</td><td>防止&quot;分身再开分身&quot;无限套娃</td></tr><tr><td><strong>上下文隔离 ≠ 权限隔离</strong></td><td>子 agent 的工具调用<strong>仍走</strong> PreToolUse hook</td><td>隔离的是注意力，不是安全策略</td></tr></tbody></table>
+<p><strong>进阶（真实 CC 有三种模式）</strong>：</p>
+<table><thead><tr><th>模式</th><th>上下文</th><th>目的</th></tr></thead><tbody><tr><td>Normal Subagent</td><td>全新 messages[]</td><td>纯隔离</td></tr><tr><td><strong>Fork Subagent</strong></td><td><code>buildForkedMessages()</code> 构造<strong>缓存友好的前缀</strong></td><td><strong>共享 prompt cache</strong></td></tr><tr><td>General-Purpose</td><td>同 Normal</td><td>通用</td></tr></tbody></table>
+<p>Fork 模式（<code>forkSubagent.ts</code>）是教学版没讲的精髓：它<strong>不</strong>为隔离而创建全新上下文，而是让子 agent 的 system prompt、tools、model、messages 前缀、thinking 配置和父 agent <strong>字节级一致</strong>，这样 Anthropic API 的 prompt cache 能命中、不必重算——<strong>省钱省延迟</strong>。还有 <code>permissionMode: &#x27;bubble&#x27;</code>：子 agent 的权限弹窗<strong>冒泡到父终端</strong>，你在主终端里替它审批。</p>
+<h3 id="codex派生一个线程记进agent-图谱还带身份">Codex：派生一个<strong>线程</strong>，记进<strong>agent 图谱</strong>，还带<strong>身份</strong></h3>
+<p>Codex 的分身没有做成一个简单的 <code>task</code> 工具，而是更&quot;基础设施化&quot;。证据散落在几个 crate 里：</p>
+<ul><li><a href="../../codex/codex-rs/agent-graph-store/index.html"><code>agent-graph-store/</code></a>：注释直说它是 <em>&quot;Storage-neutral parent/child topology for thread-spawned agents&quot;</em>——一个存<strong>父/子 agent 拓扑</strong>的存储，带 <code>ThreadSpawnEdgeStatus</code>。也就是说，Codex 把&quot;谁派生了谁&quot;建成一张<strong>可持久化、可查询的图</strong>，而不只是一次性的函数调用。</li><li><a href="../../codex/codex-rs/agent-identity/index.html"><code>agent-identity/</code></a>：用 <strong>ed25519 签名 + curve25519</strong> 给 agent 一个<strong>加密身份</strong>。子 agent 不是匿名分身，而是有可验证身份的实体。</li><li>派生出的子 agent 本身是一个 <strong>thread</strong>（<code>thread-store</code> / <code>thread-manager</code>），和主线程一样有完整的 rollout（见<a href="context-cc-vs-codex.html">上下文篇</a>第 7 节）——可持久化、可恢复、可审计。</li></ul>
+<p>对比一下就很清楚：</p>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>分身是什么</td><td>一次 <code>task</code> 工具调用，跑完即弃</td><td>一个被派生的 <strong>thread</strong>，进入 <strong>agent 图谱</strong></td></tr><tr><td>拓扑</td><td>父子关系隐式（chainId、depth+1）</td><td>显式持久化的 <strong>parent/child 图</strong></td></tr><tr><td>身份</td><td>无（匿名子 agent）</td><td><strong>加密身份</strong>（可签名验证）</td></tr><tr><td>缓存优化</td><td>Fork 模式共享 prompt cache</td><td>走 Responses 服务端状态（见上下文篇）</td></tr><tr><td>回传</td><td>只回传文本结论</td><td>子线程完整 rollout 可被父/系统访问</td></tr></tbody></table>
+<p><strong>为什么 Codex 这么&quot;重&quot;？</strong> 因为它要支持云端、可审计、可恢复、可互操作的场景：当一群 agent 在云上跑、要追责、要重放时，&quot;谁派生了谁、各自身份是什么、各自完整历史在哪&quot;就不能是内存里一次性的东西，得是持久化的图 + 身份 + rollout。CC 的 <code>task</code> 则把分身做成轻量的本地工具调用，契合&quot;本地、交互、当场用完&quot;的体感。</p>
+<hr>
+<h2 id="2-一个特别的子代理codex-的审批官本身就是个-subagent">2. 一个特别的子代理：Codex 的&quot;审批官&quot;本身就是个 subagent</h2>
+<p>这是 Codex 一个很能体现其气质的设计。回忆<a href="../index.html">审批与 Guardian</a>那两章——Codex 的审批可以<strong>路由给谁</strong>？看 <code>protocol/src/config_types.rs</code> 里的 <code>ApprovalsReviewer</code>：</p>
+<pre><code>&quot;user&quot; | &quot;auto_review&quot; | &quot;guardian_subagent&quot;</code></pre>
+<p>其中 <code>auto_review</code>（旧名就叫 <code>guardian_subagent</code>）的官方描述是：</p>
+<blockquote><em>&quot;uses a carefully prompted <strong>subagent</strong> to gather relevant context and apply a risk-based decision framework before approving or denying the request.&quot;</em></blockquote>
+<p>也就是说：<strong>当一个危险操作需要审批、而现场没有人类时，Codex 会派一个专门的&quot;审批官&quot;子代理</strong>去搜集上下文、按风险框架决定批不批。配合 <code>Op::Review</code> / <code>EnteredReviewMode</code> / <code>ReviewDecision</code>，Codex 还有一个专门的 <strong>Review 模式</strong>（典型用途：派一个 reviewer 子代理去审一段 diff）。</p>
+<p><strong>这正是 Codex 的灵魂在多智能体层面的延续</strong>：Claude Code 倾向&quot;让人来把关&quot;，Codex 倾向&quot;没人时，派个 AI 把关&quot;——连&quot;分身&quot;最典型的用途，都是为了<strong>安全审查</strong>。CC 的子代理更多是&quot;帮我干活的分身&quot;，Codex 的标志性子代理是&quot;替我把关的审查员&quot;。</p>
+<hr>
+<h2 id="3-组队multi-agent从分身到团队">3. 组队（Multi-Agent）：从&quot;分身&quot;到&quot;团队&quot;</h2>
+<p>分身是&quot;主仆&quot;（父派子、子回传）。当任务需要<strong>多个对等 agent 并行协作</strong>时，就需要团队基础设施。这里两套系统分道扬镳得最彻底。</p>
+<h3 id="claude-code文件系统就是消息总线">Claude Code：文件系统就是消息总线</h3>
+<p>learn-cc 的 s15–s17 揭示了一个朴素而强大的设计——<strong>没有中央消息总线，协调全靠文件系统</strong>：</p>
+<ul><li><strong>MessageBus = 文件收件箱</strong>（s15）：每个 agent 有一个目录当&quot;收件箱&quot;，发消息就是往对方目录写一个文件，收消息就是读自己目录。无需任何中间件，文件系统天然是持久的、可观察的、跨进程的。</li><li><strong>15 种消息类型</strong>：请求、响应、状态更新、认领、交接…… 形成一套通信词汇表。</li><li><strong>协议状态机</strong>（s16）：<code>ProtocolState</code> 跟踪请求状态，四步协议流程，<code>dispatch_message</code> 按类型路由，<code>match_response</code> 做类型校验——让&quot;队友间的对话&quot;有章法、不串台。</li><li><strong>Lead + 队友 + 自治认领</strong>（s17）：有一个 Lead（领队）和若干队友；队友进入 <strong>WORK → IDLE → SHUTDOWN</strong> 生命周期，<strong>空闲时轮询一个&quot;任务看板&quot;，自己认领未被认领的任务</strong>（<code>scan_unclaimed_tasks</code> + <code>claim_task</code> 的 owner 检查），干完把 summary 发回 Lead。队友 idle 时<strong>等待而非退出</strong>，并周期性<strong>重注入自己的身份</strong>以防上下文漂移。</li><li><strong>权限冒泡</strong>：队友的危险操作冒泡到 Lead/主终端审批。</li></ul>
+<p>一句话：<strong>CC 把多智能体做成&quot;一群跑在你机器上的队友，靠共享文件系统的收件箱和一套协议，自治地认领并协作完成看板上的任务&quot;。</strong> 极其 local-first、去中心、可观察（你能直接 <code>cat</code> 它们的收件箱看它们在聊什么）。</p>
+<h3 id="codex有身份的线程网络-云-互操作-可被调用">Codex：有身份的线程网络 + 云 + 互操作 + 可被调用</h3>
+<p>Codex 没有把团队做成&quot;文件收件箱里的队友&quot;，而是做成一套更结构化、更面向云与互操作的基础设施：</p>
+<ul><li><strong>agent 图谱 + 身份</strong>（第 1 节）：多 agent 天然是图里有身份的节点，父子/派生关系被持久化追踪。</li><li><strong>协作模式（Collaboration Mode）</strong>：<code>config_types.rs</code> 里有 <code>CollaborationMode</code>（带 model + effort 设置）、<code>collaboration-mode-templates</code> crate、&quot;TUI 启动时的初始协作模式&quot;。即 Codex 把&quot;如何协作&quot;抽象成可配置、可切换的<strong>模式</strong>。</li><li><strong>AgentMessage</strong>：<code>protocol/src/models.rs</code> 有 <code>AgentMessage { content: Vec&lt;AgentMessageInputContent&gt; }</code>——agent 间消息是协议里的一等内容类型，而非借道文件。</li><li><strong>cloud-tasks</strong>（<code>cloud-tasks/</code> <code>cloud-tasks-client/</code>）：把 agent 任务<strong>派到云上</strong>跑——这是 CC 的本地文件收件箱模型给不了的。Codex Web 就建在这之上。</li><li><strong>external-agent-sessions</strong>（<code>external-agent-sessions/</code> <code>external-agent-migration/</code>）：能<strong>解析并导入&quot;外部 agent&quot;的会话历史</strong>（<code>detect_recent_sessions</code> / <code>load_session_for_import</code>，基于 <code>RolloutItem</code>）——即把别的 agent（甚至别的工具）的历史接过来继续。<strong>互操作</strong>是一等公民。</li><li><strong>Codex 即 MCP 服务端</strong>（见 MCP 那章）：Codex 能<strong>作为一个工具被别的 agent 调用</strong>（<code>mcp-server</code> 暴露一个 <code>codex</code> 工具，跑一整个任务）。在多智能体世界里，这意味着 <strong>Codex 本身就是别人团队里的一个可调用成员</strong>。</li></ul>
+<p>一句话：<strong>Codex 把多智能体做成&quot;有身份、有图谱、能上云、能互相导入历史、还能被别的 agent 当工具调用的线程网络&quot;。</strong> 它不假设大家都在同一台机器、同一个文件系统上。</p>
+<hr>
+<h2 id="-重点agent-之间到底怎么通信">★ 重点：agent 之间到底怎么通信</h2>
+<p>组队的核心是<strong>通信</strong>。两套系统在&quot;一个 agent 怎么把话传给另一个 agent&quot;上做了截然不同的选择：<strong>CC 把通信放在文件系统里（带外），Codex 把通信放进协议本身（带内）。</strong> 这是整篇最值得细看的一节。</p>
+<h3 id="claude-code文件收件箱-轮询带外通信">Claude Code：文件收件箱 + 轮询（带外通信）</h3>
+<p>CC 的 agent 通信完全建立在文件系统上——<strong>模型协议本身根本不知道&quot;队友&quot;存在</strong>，通信是 harness 在旁边搭的一根管子。</p>
+<ul><li><strong>收件箱 = 一个文件</strong>：每个 agent 有一个 mailbox（真实路径 <code>~/.claude/teams/{team}/inboxes/{agent}.json</code>）。发消息 = 往对方文件 append 一条 JSON；用 <code>proper-lockfile</code> 文件锁防并发写（最多重试 10 次）。读是<strong>消费式</strong>的：读完即删。</li><li><strong>轮询，而非推送</strong>：Lead 用 <code>useInboxPoller</code> <strong>每 1 秒</strong>扫一次收件箱，有消息就作为新一轮 turn 提交给模型；队友用 <code>useSwarmPermissionPoller</code> <strong>每 500ms</strong> 轮询审批回复。没有长连接，就是定时读文件。</li><li><strong>15 种结构化消息类型</strong>：通信不是自由文本，而是一套词汇表——</li></ul>
+<table><thead><tr><th>类型</th><th>方向</th><th>用途</th></tr></thead><tbody><tr><td><code>plain text</code></td><td>双向</td><td>普通通信（包进 <code>&lt;teammate-message&gt;</code> 交给模型）</td></tr><tr><td><code>idle_notification</code></td><td>队友→Lead</td><td>我这轮干完了，进入空闲</td></tr><tr><td><code>permission_request</code> / <code>_response</code></td><td>双向</td><td>操作审批的请求/回复</td></tr><tr><td><code>plan_approval_request</code> / <code>_response</code></td><td>双向</td><td>计划审批</td></tr><tr><td><code>shutdown_request</code> / <code>_approved</code> / <code>_rejected</code></td><td>双向</td><td>体面关机握手</td></tr><tr><td><code>task_assignment</code></td><td>Lead→队友</td><td>派活</td></tr><tr><td><code>team_permission_update</code> / <code>mode_set_request</code></td><td>Lead→队友</td><td>广播/修改权限</td></tr><tr><td><code>sandbox_permission_*</code></td><td>双向</td><td>网络权限请求/回复</td></tr><tr><td><code>teammate_terminated</code></td><td>系统</td><td>队友被移除通知</td></tr></tbody></table>
+<ul><li><strong>怎么进入模型视野</strong>：文本消息被包进 <code>&lt;teammate-message&gt;</code> XML 标签，注入收件方下一轮的上下文。对模型而言，&quot;队友说了什么&quot;=它 context 里多出来的一段标记文本。</li><li><strong>团队注册表</strong>：<code>~/.claude/teams/{team}/config.json</code> 记 Lead、成员（名字、类型、颜色、是否活跃）。</li><li><strong>气质</strong>：去中心（没有中央 broker，大家互写文件）、可观察（你能 <code>cat</code> 收件箱围观它们聊天）、语言无关——但<strong>假设共享同一个文件系统</strong>（同一台机器）。</li></ul>
+<h3 id="codex协议内的-agentmessage带内通信">Codex：协议内的 AgentMessage（带内通信）</h3>
+<p>Codex 把 agent 通信<strong>做进了协议本身</strong>——它不是旁边的文件管子，而是和&quot;用户消息&quot;&quot;工具调用&quot;平起平坐的一类协议条目。</p>
+<ul><li><strong>提交侧</strong>：一等 <code>Op::InterAgentCommunication { communication }</code>（<a href="../../codex/codex-rs/protocol/src/protocol.rs"><code>protocol.rs:499</code></a>）。注释明说它&quot;应被记录为 assistant 历史&quot;——一条 agent 间通信会<strong>进入线程的持久记录 rollout</strong>（见<a href="context-cc-vs-codex.html">上下文篇</a>）。</li><li><strong>历史侧</strong>：<code>ResponseItem::AgentMessage { author, recipient, content }</code>（<code>models.rs</code>）——agent 消息是 Responses 协议里的一种 <strong>ResponseItem</strong>，和 <code>Message</code>/<code>Reasoning</code>/<code>FunctionCall</code> 并列，自带 <code>author</code>（谁发的）和 <code>recipient</code>（发给谁）。</li><li><strong>寻址用 AgentPath，支持多收件人</strong>：<code>InterAgentCommunication</code> 带 <code>recipient: AgentPath</code> + <code>other_recipients: Vec&lt;AgentPath&gt;</code>（<code>protocol.rs:626</code>）——像邮件的 <strong>To + Cc</strong>，一条消息可发给多个 agent。<code>AgentPath</code> 是路径式寻址，呼应第 1 节的 agent 图谱。</li><li><strong>内容可加密</strong>：<code>AgentMessageInputContent::EncryptedContent { encrypted_content }</code>——agent 间消息可以是<strong>加密</strong>的（呼应 agent-identity 的签名身份）。多租户/不可信环境里，A 发给 B 的话中间人看不到。</li><li><strong>带&quot;阶段&quot;语义</strong>：<code>MessagePhase</code>（<code>Commentary</code> / <code>FinalAnswer</code>）区分&quot;中途碎碎念&quot;和&quot;最终答复&quot;，让接收方知道这是过程还是结论。</li><li><strong>气质</strong>：带内（通信即历史的一部分，天然可审计、可重放）、不假设共享文件系统（可跨机/上云）、可加密 + 身份绑定、多收件人寻址。</li></ul>
+<h3 id="一张表看懂通信的分野">一张表看懂&quot;通信&quot;的分野</h3>
+<table><thead><tr><th>维度</th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>通信位置</td><td><strong>带外</strong>：文件系统收件箱</td><td><strong>带内</strong>：协议里的 <code>AgentMessage</code> 条目</td></tr><tr><td>传输</td><td>写对方的 <code>.json</code> mailbox</td><td><code>Op::InterAgentCommunication</code> 提交</td></tr><tr><td>投递</td><td><strong>轮询</strong>（Lead 1s / 队友 500ms）</td><td>协议事件流，随回合流动</td></tr><tr><td>寻址</td><td>文件名 = agent 名</td><td><code>AgentPath</code> + 多收件人（To/Cc）</td></tr><tr><td>并发安全</td><td><code>proper-lockfile</code> 文件锁</td><td>协议/线程层处理</td></tr><tr><td>消息词汇</td><td>15 种结构化类型</td><td>通信条目 + phase（commentary/final）</td></tr><tr><td>安全</td><td>靠文件权限</td><td><strong>内容可加密 + 加密身份</strong></td></tr><tr><td>持久化</td><td>mailbox 文件（读完即删）</td><td><strong>进 rollout 持久记录</strong></td></tr><tr><td>可观察性</td><td><code>cat</code> 收件箱即可围观</td><td>在 rollout / 事件流里审计</td></tr><tr><td>跨机器</td><td>否（假设同一文件系统）</td><td><strong>是</strong>（协议消息，可上云）</td></tr><tr><td>模型如何看见</td><td>注入 <code>&lt;teammate-message&gt;</code> 文本</td><td>本就是历史里的 <code>AgentMessage</code> 条目</td></tr></tbody></table>
+<h3 id="为什么一个带外文件一个带内协议">为什么一个&quot;带外文件&quot;、一个&quot;带内协议&quot;？</h3>
+<ul><li><strong>CC 选文件收件箱</strong>：因为它 local-first。一台机器上，文件系统是现成、可靠、可观察的 IPC——你甚至能直接 <code>cat</code> 看 agent 们在说什么，调试体验极好；轮询简单到不会出错。代价是<strong>假设共享一个文件系统</strong>，难跨机器。通信被有意做成&quot;harness 层的管子&quot;，模型协议保持干净。</li><li><strong>Codex 选协议内消息</strong>：因为它为云端/分布式/可审计而生。当 agent 可能在不同机器、甚至不同信任域里时，&quot;写对方的文件&quot;根本不成立——必须是<strong>可路由、可加密、带身份、且天然进入持久记录</strong>的协议消息。代价是更重、更&quot;黑盒&quot;（不能简单 <code>cat</code>，得去 rollout/事件流里看）。</li></ul>
+<p><strong>一句话</strong>：CC 把 agent 通信当成<strong>共享文件系统上的邮件</strong>，Codex 把它当成<strong>协议里可加密、可路由、可审计的一等消息</strong>。前者是 Unix 管道的智慧，后者是分布式系统的思路——又一次，场景（本地 vs 云）决定了机制。</p>
+<hr>
+<h2 id="4-横切对比递归权限同步异步本地云">4. 横切对比：递归、权限、同步/异步、本地/云</h2>
+<table><thead><tr><th>维度</th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>分身载体</td><td><code>task</code> 工具，跑完即弃</td><td>派生 thread，进 agent 图谱</td></tr><tr><td>分身模式</td><td>Normal / <strong>Fork（共享缓存）</strong> / General</td><td>thread + 身份 + rollout</td></tr><tr><td>标志性子代理</td><td>&quot;帮我干活&quot;的通用分身</td><td><strong>&quot;替我把关&quot;的审查员（auto_review）</strong></td></tr><tr><td>递归防护</td><td>子 agent 无 <code>task</code>；<code>isInForkChild()</code> 查 tag</td><td>图谱拓扑天然记录深度/边状态</td></tr><tr><td>权限</td><td>隔离上下文但<strong>不隔离权限</strong>；冒泡到父终端审批</td><td>子代理同样受审批/沙箱约束；可路由给 reviewer 子代理</td></tr><tr><td>同步/异步</td><td>同步等待，或 <code>run_in_background</code> 异步 + 通知</td><td>线程/云任务天然异步、可持久</td></tr><tr><td>团队协调</td><td><strong>文件系统收件箱</strong> + 15 种消息 + 协议 + 自治看板</td><td>协议内 <code>AgentMessage</code> + 协作模式 + cloud-tasks</td></tr><tr><td>边界</td><td>同机、同文件系统、local-first</td><td>跨机、上云、可导入外部会话、可被调用</td></tr><tr><td>可观察性</td><td><code>cat</code> 收件箱即可围观</td><td>rollout + agent 图谱 + 身份，偏审计</td></tr></tbody></table>
+<hr>
+<h2 id="5-为什么不同把账算到底">5. 为什么不同？把账算到底</h2>
+<blockquote><strong>CC 把多智能体做成&quot;你机器上一支用文件收件箱协调的自治队友团&quot;；Codex 做成&quot;一张有身份、能上云、能互操作、能被调用的线程网络&quot;。</strong></blockquote>
+<p>根因还是那三层（和<a href="context-cc-vs-codex.html">上下文篇</a>同源）：</p>
+<ol><li><strong>场景</strong>：CC 面向本地交互——一个人一台机，于是&quot;文件系统当总线、队友自治认领看板、权限冒泡到你终端&quot;既简单又契合，你还能亲眼围观。Codex 面向云端/无人值守/可审计——于是&quot;持久化 agent 图谱 + 加密身份 + cloud-tasks + rollout&quot;是地基。</li><li><strong>互操作野心</strong>：Codex 的 <code>external-agent-sessions</code> 和 MCP-server 表明它想<strong>和别的 agent 互通、并成为别人系统里的一块积木</strong>；CC 的团队更像&quot;自家队友闭环协作&quot;。</li><li><strong>安全气质的延续</strong>：Codex 连&quot;分身&quot;最标志性的用法都是<strong>审查员子代理（auto_review）</strong>——把&quot;没人时也要有人把关&quot;贯彻到多智能体层；CC 则把人留在审批回路里（权限冒泡到你终端）。</li></ol>
+<p>两套都自洽。一个把多智能体当<strong>本地协作模式</strong>，一个把它当<strong>分布式基础设施</strong>。</p>
+<hr>
+<h2 id="6-思考">6. 思考</h2>
+<div class="think">
+<ol><li>CC 用&quot;文件系统当消息总线&quot;——朴素但你能 <code>cat</code> 围观。Codex 用协议内 <code>AgentMessage</code> + agent 图谱——结构化但更&quot;黑盒&quot;。在调试一个 5-agent 卡死的团队时，你更想要哪种？</li><li>Codex 给 agent 加<strong>加密身份</strong>。在什么场景下，&quot;这条改动是哪个 agent、由谁授权做的&quot;必须能被密码学证明？（提示：想想合规、多租户、供应链。）</li><li>&quot;审批官也是个子代理&quot;（auto_review）——让一个 AI 去审另一个 AI 要不要执行危险命令。这个 reviewer 会不会被同样的方式骗过？该给它什么它不该有的&quot;超能力&quot;才靠谱？</li><li>CC 的队友&quot;空闲时自己去看板认领任务&quot;。如果两个队友同时认领同一个任务会怎样？<code>claim_task</code> 的 owner 检查解决了竞态——可如果是跨机器（像 Codex 云端），文件锁还够用吗？</li><li>Codex 能把任务派到云上、还能导入别的 agent 的会话。当&quot;我的 agent&quot;和&quot;云上的 agent&quot;和&quot;别人家的 agent&quot;边界模糊后，&quot;上下文&quot;和&quot;身份&quot;哪个会先成为瓶颈？</li></ol>
+</div>
+<hr>
+<p><a href="../index.html">← 返回 learn-codex 总览</a> · 姊妹篇：<a href="context-cc-vs-codex.html">上下文处理全解</a> · 相关章节：子代理与团队、审批与 Guardian、MCP</p>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

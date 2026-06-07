@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s14: Guardian — 自动风险评估</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s14-guardian-自动风险评估">s14: Guardian — 自动风险评估</h1>
+<blockquote><em>&quot;没人盯着的时候，谁来把关？派一个 AI 评审员先判一遍。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s13_hooks/index.html">Hooks</a> → <strong>本章</strong> → <a href="../s15_mcp/index.html">MCP：客户端 + 服务端</a></p>
+<hr>
+<h2 id="先把思想说透没人把关时就派个-ai-去把关">先把思想说透：没人把关时，就派个 AI 去把关</h2>
+<p>上一层的审批（<a href="../s04_approval/index.html">s04</a>）很优雅：危险命令弹个窗，让人拍板。可它藏着一个隐含前提——<strong>得有个人在那儿、并且在认真看</strong>。一旦 Codex 跑进 CI 流水线、云端任务、IDE 后端这类<strong>没人盯着屏幕</strong>的环境（统称 headless / 无人值守），这个前提就塌了：没有人能回那个弹窗。这一章所有的纠结，根子都在这句话里。想通下面三个道理，你就明白 Guardian 这个新角色为什么非有不可。</p>
+<p><strong>道理一：「没人在场」时，原来的审批会被逼进一个死角。</strong> 模型想跑一条有风险的命令时，审批策略要么「问用户」、要么「不问」。可这两条路在无人值守下都走不通：挂「问用户」，每条稍微敏感的命令都把决定<strong>升级</strong>（escalate，意思是把拍板权从自动流程交回给人）给一个<strong>不会回应</strong>的人——回合就卡死在那里；挂「不问」，等于把判断权全交给模型，它一旦失误或被注入诱导，灾难命令也照跑不误。<strong>要么卡死等一个不会来的回应，要么放任不管</strong>——中间缺了一个能在用户缺席时替他做判断的东西。</p>
+<p><strong>道理二：缺的那个「判断者」，本来就是一项可以委派出去的工作——那就派一个 AI 去做。</strong> 关键的跳跃在这里：「判断这条命令该不该放」原本是人做的事，但它本质上是一项<strong>认知工作</strong>，而认知工作恰恰是 AI 能干的。于是 Codex 的答案是——在主 agent 真正执行某条命令前，<strong>先派出一个专门的 AI 评审员</strong>（这就是 <strong>Guardian</strong>），替缺席的用户把这条命令审一遍。这不是一组写死的 <code>if</code>，而是<strong>另开一次模型调用</strong>：把「到此刻为止的对话 + 模型计划要做的动作」喂给这个评审 agent，让它读完返回一个判断。「再开一个 AI 来审第一个 AI」就是本章的灵魂——<strong>安全感不是靠拦住所有命令得来的，而是靠把「判断」这件事也自动化、从而能规模化地铺到每一条命令上</strong>。（本章为了离线可跑，用一组保守规则<strong>模拟</strong>这个评审员，但输出形状和真的一致。）</p>
+<p><strong>道理三（最关键）：把关要分寸，且必须「失败时倒向安全」。</strong> 派个 AI 全权放行或全权拦截都太蠢——大部分命令（<code>ls</code>、<code>echo</code>）根本不值得惊动任何人，极少数命令（<code>rm -rf ~</code>、<code>curl ... | sh</code>）则几乎一定是灾难。所以 Guardian 给每个动作打一个<strong>风险档</strong>，由轻到重四级：🟢 <code>low</code>、🟡 <code>medium</code>、🟠 <code>high</code>、🔴 <code>critical</code>，再把档位映射成动作——<code>low → auto_allow</code>（自动放行，不打扰你）、<code>critical → auto_deny</code>（连问都不问直接拒），只有拿不准的 <code>medium / high → escalate</code>（升级回 <a href="../s04_approval/index.html">s04</a> 让人拍板）。一句话：<strong>两头自动、中间问人。</strong> 而当 Guardian 自己出岔子时——超时、崩了、读不懂返回内容——它<strong>默认判「拒绝」而不是「放行」</strong>，这条原则叫 <strong>fail-closed</strong>：好比门禁系统断电时自动锁死而不是大敞，<strong>出错就倒向安全的那一边</strong>。</p>
+<p>把这三点连起来：<strong>Guardian = 一个自动评审员，插在「问用户」之前，把风险分四档——低的自动放、灾难的自动拒、中间的才升级问人；它永远 fail-closed，且用户始终能覆盖它。</strong> 这正是「没人盯着的时候，谁来把关」这个问题最直接的答案，也是本课主线「为低/无人工干预下注」在安全层面的终点：连「把关的人」都被尽量自动化了。</p>
+<h2 id="问题">问题</h2>
+<p><a href="../s04_approval/index.html">s04</a> 给了我们审批策略：危险命令升级给用户拍板。这在你本地盯着屏幕时很好用。</p>
+<p>可 Codex 的野心是在<strong>没人盯着</strong>时也能跑——<code>codex exec</code> 在 CI 里、Codex 在云端、IDE 后端里一跑就是几十个回合。这时审批策略撞上一堵墙：</p>
+<ul><li>挂 <code>on-request</code>，每个稍微敏感的命令都升级问用户——可<strong>没有用户在回应</strong>，回合就卡死在那里。</li><li>挂 <code>never</code>，干脆不问——可这等于把判断权全交给模型，模型一旦失误（或被注入诱导），灾难命令也照跑不误。</li></ul>
+<p>两难：<strong>要么卡死等一个不会来的回应，要么放任不管。</strong> 中间缺了一层——一个能在用户缺席时，替用户做出&quot;这个能自动放行 / 这个必须拦下&quot;判断的东西。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>一个自动风险评估器 <code>guardian(action) -&gt; {risk, reason}</code>，把它接成一个<strong>自动审批人</strong>，插在&quot;问用户&quot;之前。风险分四档，各对应一个自动决定：</p>
+<pre><code>   model 要执行 action（命令 / 补丁）
+        │
+        ▼
+   ┌──────────── guardian(action) ────────────┐
+   │   评估风险 → {risk, reason}                 │
+   │        │                                   │
+   │   ┌────┴─────────────────────────────┐    │
+   │   │ 🟢 low      → auto_allow（不打扰） │    │
+   │   │ 🟡 medium   ┐                      │    │
+   │   │ 🟠 high     ┘→ escalate（问用户）   │── 回到 s04 审批门
+   │   │ 🔴 critical → auto_deny（连问都不问）│    │
+   │   └──────────────────────────────────┘    │
+   └────────────────────┬──────────────────────┘
+                         ▼
+        执行 / 不执行（或交给用户拍板）</code></pre>
+<p>低风险自动放行（省得每条 <code>ls</code> 都打扰你），灾难级自动拒（fail-closed，连问都不问），只有中间的 medium / high 才<strong>升级</strong>回 <a href="../s04_approval/index.html">s04</a> 的审批门让人决定。这样：有人时少打扰，没人时也不失守。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>，两块。</p>
+<p><strong>第 1 块</strong> — 风险评估器 <code>guardian()</code>，返回与真源码同形状的 <code>{risk, reason}</code>：</p>
+<pre><code class="language-python">RISK_LEVELS = (&quot;low&quot;, &quot;medium&quot;, &quot;high&quot;, &quot;critical&quot;)
+
+def guardian(action):
+    if &quot;rm -rf ~&quot; in low or &quot;curl ... | sh&quot;: return {&quot;risk&quot;: &quot;critical&quot;, ...}
+    if low.startswith(&quot;sudo &quot;) or &quot;rm &quot;:     return {&quot;risk&quot;: &quot;high&quot;, ...}
+    if &quot;git commit&quot; / &quot;pip install&quot; / &quot;&gt;&quot;:   return {&quot;risk&quot;: &quot;medium&quot;, ...}
+    return {&quot;risk&quot;: &quot;low&quot;, &quot;reason&quot;: &quot;只读或无明显副作用&quot;}</code></pre>
+<p>四个档名直接来自真源码 <a href="../../codex/codex-rs/protocol/src/approvals.rs"><code>GuardianRiskLevel::{Low, Medium, High, Critical}</code></a>（<code>approvals.rs:85</code>）。真实里这判断不是规则给的，而是一个<strong>评审 LLM</strong> 给的（详见下方深入）；本章用一组保守规则<strong>模拟</strong>那个评审员，好让 demo 离线可跑。</p>
+<p><strong>第 2 块</strong> — 把风险档位映射成自动决定，再串进执行：</p>
+<pre><code class="language-python">def auto_decision(action):
+    risk = guardian(action)[&quot;risk&quot;]
+    if risk == &quot;low&quot;:      return {... &quot;decision&quot;: &quot;auto_allow&quot;}
+    if risk == &quot;critical&quot;: return {... &quot;decision&quot;: &quot;auto_deny&quot;}
+    return {... &quot;decision&quot;: &quot;escalate&quot;}          # medium / high
+
+def guarded_execute(action, ask_user, run_fn):
+    v = auto_decision(action)
+    if v[&quot;decision&quot;] == &quot;auto_allow&quot;: return run_fn(action)
+    if v[&quot;decision&quot;] == &quot;auto_deny&quot;:  return &quot;[guardian 自动拒绝] 未执行&quot;
+    return run_fn(action) if ask_user(action, v[&quot;risk&quot;]) else &quot;[用户拒绝] 未执行&quot;  # escalate</code></pre>
+<p><code>escalate</code> 分支正是和 <a href="../s04_approval/index.html">s04</a> 的接缝——Guardian 判不下来的，回退给审批门让人拍板。</p>
+<p><code>--demo</code> 把五条动作喂进 guardian：<code>echo</code>（low→自动放行）、<code>git commit</code>（medium→升级，模拟用户批准）、<code>rm -rf build</code>（high→升级，模拟用户拒绝）、<code>curl|sh</code> 和 <code>rm -rf ~</code>（critical→自动拒）。每条都打印风险档、理由、自动决定。</p>
+<p><strong>走一遍。</strong> 我们挑 demo 里<strong>三条有代表性的动作</strong>，看每条<strong>进 guardian 长什么样、guardian 判出什么、最后怎么处置</strong>——三条正好覆盖&quot;自动放 / 升级问人 / 自动拒&quot;三种结局。</p>
+<ol><li><strong><code>echo SQ/EQ works</code> —— 低风险，自动放行。</strong></li></ol>
+<p>   进 <code>guardian()</code>，命令只是打印，没有任何副作用，落到最后一条兜底规则，返回：</p>
+<pre><code class="language-json">   { &quot;risk&quot;: &quot;low&quot;, &quot;reason&quot;: &quot;只读或无明显副作用&quot; }</code></pre>
+<p>   <code>auto_decision</code> 把 <code>low</code> 映射成 <code>auto_allow</code>。<code>guarded_execute</code> 看到 <code>auto_allow</code>，<strong>直接执行，根本不惊动用户</strong>。这就是为什么你不会被每条 <code>ls</code>、<code>echo</code> 烦死。</p>
+<ol><li><strong><code>rm -rf build</code> —— 高风险，升级问人。</strong></li></ol>
+<p>   进 <code>guardian()</code>，命中&quot;含 <code>rm</code>&quot;的规则，返回：</p>
+<pre><code class="language-json">   { &quot;risk&quot;: &quot;high&quot;, &quot;reason&quot;: &quot;删除文件 / 提权 / 危险操作&quot; }</code></pre>
+<p>   <code>auto_decision</code> 把 <code>high</code>（和 <code>medium</code> 一样）映射成 <code>escalate</code>——<strong>guardian 不敢自己拍板</strong>。于是 <code>guarded_execute</code> 走到最后一行，调 <code>ask_user(action, &quot;high&quot;)</code> 把球踢回给人（demo 里模拟用户答&quot;拒绝&quot;）。<strong>为什么不自动拒？</strong> 因为 <code>rm -rf build</code> 在很多正常工作流里是合理的（清理构建产物），一刀切拒掉会挡住正经活——这种&quot;危险但可能合理&quot;的，正该交给人。这一步就是和 <a href="../s04_approval/index.html">s04</a> 审批门的接缝。</p>
+<ol><li><strong><code>rm -rf ~</code> —— 灾难级，自动拒（fail-closed 的精神）。</strong></li></ol>
+<p>   进 <code>guardian()</code>，命中&quot;灾难&quot;规则，返回：</p>
+<pre><code class="language-json">   { &quot;risk&quot;: &quot;critical&quot;, &quot;reason&quot;: &quot;可能摧毁系统 / 远程执行任意代码&quot; }</code></pre>
+<p>   <code>auto_decision</code> 把 <code>critical</code> 映射成 <code>auto_deny</code>。<code>guarded_execute</code> <strong>连问都不问</strong>，直接返回 <code>[guardian 自动拒绝] 未执行</code>。<strong>为什么连问都不问？</strong> 因为这种命令几乎不存在&quot;正当用途&quot;，把它升级给用户、反而给了&quot;手滑点同意&quot;或&quot;被社工诱导点同意&quot;的机会——倒不如直接焊死。这就是&quot;宁可错杀&quot;在 demo 里的体现。</p>
+<p>把三条连起来看：<strong>同一个 guardian，对三条命令给出三种风险档，再映射成三种处置——两头（low/critical）它自己包办，只有中间（medium/high）才把人拉进来。</strong> 这正是 Guardian 的全部价值：在没人盯着时，它替你挡掉了绝大多数无谓的打扰和无谓的风险，只把真正需要人判断的那一小撮留给你。</p>
+<h2 id="生产级用-ai-把关更要给这个-ai-上保险">生产级：用 AI 把关，更要给这个 AI 上保险</h2>
+<p>让一个 AI（Guardian）替缺席的用户把关，听着就危险——这个把关器本身会超时、会崩、会被骗。所以 Guardian 的生产级，全在给它套的几道保险上：</p>
+<ul><li><strong>fail-closed</strong>：Guardian 超时 / 崩溃 / 返回的 JSON 解析不了——<strong>一律判拒</strong>，绝不&quot;出错就放行&quot;（真源码 <code>core/src/guardian/review.rs:147/251</code>）。把关器失灵时倒向安全，和沙箱 deny-default（<a href="../s05_sandbox/index.html">s05</a>）、审批 <code>TimedOut→拒</code>（<a href="../s04_approval/index.html">s04</a>）同一个直觉。</li><li><strong>熔断器</strong>：防止 Guardian 自己失控地反复评/反复拒。<code>MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN = 3</code>——一个回合里连续拒到阈值就熔断，不再空转烧钱（呼应 <a href="../s09_responses_api/index.html">s09 重试</a> 那个&quot;光退避不够、还要断路器&quot;的问题）。</li><li><strong>结构化契约 + 超时</strong>：Guardian 必须返回严格 JSON（<code>GuardianAssessment</code>），跑在一个有超时的 fork 子会话里——读不懂或不返回，都走 fail-closed。</li><li><strong>诚实的局限</strong>：Guardian 和被它审的往往是<strong>同代同源</strong>的模型——能骗过第一个的注入，可能同样骗过它（见本章思考 1）。&quot;用 AI 审 AI&quot;增加的是一道<strong>不同视角</strong>的检查，不是一道不可逾越的墙。</li></ul>
+<blockquote>一句话：Guardian 的价值不在&quot;AI 很聪明会把关&quot;，而在&quot;<strong>把关器失灵时，整个系统倒向拒绝而非放行</strong>&quot;。这才是它敢在无人值守时上岗的底气。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<p>这是 Codex 与 Claude Code <strong>最鲜明的一处差异（⭐）</strong>：Codex 多了一整层&quot;自动评审员&quot;，Claude Code 没有对应物。</p>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>谁判断风险</td><td><strong>用户</strong>（弹窗摆在你面前，你来判）</td><td><strong>一个自动评审 agent</strong>（Guardian）先判一遍</td></tr><tr><td>没人盯着时</td><td>卡在弹窗 / 全凭模型</td><td>Guardian 替用户做 low→放行、critical→拒 的判断</td></tr><tr><td>判断依据</td><td>人的直觉 + 当下注意力</td><td>评审 LLM 读转录 + 计划动作，返回结构化 <code>{risk, outcome, rationale}</code></td></tr><tr><td>失守模式</td><td>用户点了&quot;无脑同意&quot;</td><td>Guardian 误判（但 critical fail-closed + 用户可覆盖）</td></tr></tbody></table>
+<p><strong>为什么 Codex 要多这一层？</strong> 一句话：<strong>为了在没人看着时也能安全地放大自主度。</strong></p>
+<p>Claude Code 的设想是&quot;人和 agent 并肩&quot;——危险操作弹窗问你，由人把最后一道关，这套在交互式场景里既安全又流畅。但它有个隐含前提：<strong>有一个人在那儿、并且在认真看</strong>。一旦进入 headless / CI / 云端，这个前提就塌了。</p>
+<p>Codex 押的是&quot;自主&quot;——它必须假设<strong>没有人在回应</strong>。于是它把&quot;判断风险&quot;这件原本由人做的事，<strong>也交给一个 AI</strong>：一个专门的评审子 agent，在主 agent 的工具调用真正执行前，先独立读一遍上下文、判一遍风险。这一层让 Codex 既不必为每条命令卡死等人，也不必把判断权完全让给可能失误的主模型——而是用&quot;第二个 AI&quot;来给&quot;第一个 AI&quot;把关。这正是本课程主线&quot;Codex 为低人工干预下注&quot;在安全层面的终极体现：连&quot;把关的人&quot;都被尽量自动化了。</p>
+<p>注意 Guardian <strong>不取代</strong>审批和沙箱，而是叠在它们之上：Guardian 判 escalate 时仍回退给用户审批（<a href="../s04_approval/index.html">s04</a>），命令最终仍跑在内核沙箱里（<a href="../s05_sandbox/index.html">s05</a>）。它只是把&quot;能自动放行/必须拦下&quot;的两头摘出来，省掉无谓的打扰和无谓的风险。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<p>本章的 <code>guardian()</code> 是一组 <code>if</code>；真 Codex 的 Guardian 是一个<strong>会 fork 当前会话、读转录、返回严格 JSON 的评审 LLM 子 agent</strong>，外加一套 fail-closed 与防滥用机制。下面拆开。</p>
+<details>
+<summary>一、真 Guardian 是一个评审 LLM，不是规则表</summary>
+<p>真源码 <code>core/src/guardian/mod.rs</code> 顶部的 doc-comment 把它的工作流写得明明白白：</p>
+<blockquote>Guardian review decides whether an <code>on-request</code> approval should be granted automatically instead of shown to the user. 1. 重建一份紧凑的转录（保留用户意图 + 最近相关的 assistant/工具上下文）； 2. 让一个专门的 guardian 评审会话评估这个<strong>确切的计划动作</strong>，返回严格 JSON； 3. 超时 / 执行失败 / 输出畸形一律 <strong>fail closed</strong>； 4. 应用 guardian 给出的 allow/deny 结论。</blockquote>
+<p>也就是说，Guardian 自己就是一次<strong>模型调用</strong>：它 clone 父会话的 config（继承同样的网络代理/白名单），喂给它&quot;截至此刻的对话 + 计划要做的动作&quot;，要求它吐出结构化评估。本章用规则模拟这个评审员的输出，但形状一致。</p>
+<p>它返回的契约是 <code>GuardianAssessment</code>（<code>mod.rs:63</code>）：</p>
+<pre><code class="language-rust">pub(crate) struct GuardianAssessment {
+    pub risk_level: GuardianRiskLevel,            // Low / Medium / High / Critical
+    pub user_authorization: GuardianUserAuthorization,  // 转录里用户授权得有多直接
+    pub outcome: GuardianAssessmentOutcome,       // Allow / Deny（最终裁决）
+    pub rationale: String,                        // 人类可读的理由
+}</code></pre>
+<p>本章只取了 <code>risk_level</code> + <code>rationale</code>；真源码还多一个 <code>user_authorization</code>——评审员会判断&quot;用户在对话里到底有没有明确授权过这类动作&quot;，授权越直接，越敢放行。</p>
+</details>
+<details>
+<summary>二、它只在 on-request 档上岗，且永远 fail-closed</summary>
+<p>Guardian 不是无条件介入。<code>review.rs:147</code> 的 <code>routes_approval_to_guardian</code> 决定何时路由给它：</p>
+<pre><code class="language-rust">pub(crate) fn routes_approval_to_guardian_with_reviewer(turn, approvals_reviewer) -&gt; bool {
+    matches!(turn.approval_policy.value(),
+             AskForApproval::OnRequest | AskForApproval::Granular(_))
+        &amp;&amp; approvals_reviewer == ApprovalsReviewer::AutoReview
+}</code></pre>
+<p>即：只有审批策略是 <code>on-request</code>（或 <code>granular</code>）、且开启了 <code>AutoReview</code> 时，才让 Guardian 上岗——它正是 <a href="../s04_approval/index.html">s04</a> 那个 <code>on-request</code> 档的&quot;自动化升级处理器&quot;。</p>
+<p>而它的 fail-closed 是刻进函数注释里的（<code>review.rs:251</code>）：</p>
+<blockquote>This function always fails closed: timeouts, review-session failures, and parse failures all block execution.</blockquote>
+<p>本章用&quot;critical → auto_deny&quot;体现了 fail-closed 的精神；真源码更彻底：<strong>评审员超时（默认 90 秒，<code>GUARDIAN_REVIEW_TIMEOUT</code>）、跑挂了、JSON 解析失败——任何一种异常，都判 Deny</strong>。宁可错杀，不可放过。</p>
+</details>
+<details>
+<summary>三、防止评审员失控：熔断器</summary>
+<p>把&quot;判断&quot;交给一个 AI，会引出一个新问题：<strong>如果评审员自己抽风、把正常动作连环拒了怎么办？</strong> 主 agent 可能被卡在&quot;提议→被拒→再提议→又被拒&quot;的死循环里。</p>
+<p>真源码用一个熔断器解决（<code>mod.rs:98</code>，<code>GuardianRejectionCircuitBreaker</code>）：</p>
+<table><thead><tr><th>常量</th><th>值</th><th>作用</th></tr></thead><tbody><tr><td><code>MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN</code></td><td>3</td><td>一回合内连续被拒 3 次 → 中断该回合</td></tr><tr><td><code>MAX_RECENT_AUTO_REVIEW_DENIALS_PER_TURN</code></td><td>10</td><td>最近窗口里被拒 10 次 → 中断</td></tr><tr><td><code>AUTO_REVIEW_DENIAL_WINDOW_SIZE</code></td><td>50</td><td>滑动窗口大小</td></tr></tbody></table>
+<p>连续否决超阈值，就 <code>InterruptTurn</code> 把这一回合停掉，避免无意义地烧 token。本章没有这层——它假设评审是一次性的、不会成环。</p>
+</details>
+<details>
+<summary>四、它在架构上的位置：一个 ext crate + 一条事件</summary>
+<p>Guardian 在真 Codex 里是一个<strong>扩展（extension）</strong>，不是 core 的硬编码部分。<code>ext/guardian/src/lib.rs</code> 把它实现成一个 <code>ThreadLifecycleContributor</code>，通过 <code>ExtensionRegistryBuilder::thread_lifecycle_contributor</code> 装进注册表；它持有一个 <code>AgentSpawner</code>，用来 fork 出评审子 agent（<code>spawn_subagent</code>）。</p>
+<p>它对外的可见输出是一条事件 <code>GuardianAssessmentEvent</code>（<code>approvals.rs:178</code>），前端据此渲染&quot;Guardian 正在评审 / 判了什么风险 / 理由是什么&quot;：</p>
+<pre><code class="language-rust">pub struct GuardianAssessmentEvent {
+    pub id: String,
+    pub status: GuardianAssessmentStatus,   // InProgress / Approved / Denied / TimedOut / Aborted
+    pub risk_level: Option&lt;GuardianRiskLevel&gt;,
+    pub rationale: Option&lt;String&gt;,
+    pub action: GuardianAssessmentAction,    // Command / Execve / ApplyPatch / NetworkAccess / McpToolCall
+    ...
+}</code></pre>
+<p>这条事件走的正是 <a href="../s10_sq_eq_protocol/index.html">s10</a> 的 EQ（事件队列）。而 <code>action</code> 那个枚举说明 Guardian 评的不只是 shell 命令——<code>ApplyPatch</code>（补丁，见 <a href="../s03_apply_patch/index.html">s03</a>）、<code>NetworkAccess</code>（出网）、<code>McpToolCall</code>（MCP 工具，见 <a href="../s15_mcp/index.html">s15</a>）都在它的评审范围里。</p>
+<p>最后一点也最重要：<strong>用户始终能覆盖 Guardian。</strong> 真源码里有 <code>AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX</code>——当用户手动批准了一个曾被 Guardian 拒掉的动作，会注入一条开发者消息告诉模型&quot;用户已手动放行&quot;。Guardian 是把关，不是独裁。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s14_guardian/code.py --demo   # 不需要模型：5 条动作 → 风险档 + 自动决定
+python s14_guardian/code.py          # 交互模式：把你输入的命令喂给 guardian</code></pre>
+<p><code>--demo</code> 完全离线（<code>backend=mock</code>）。</p>
+<h2 id="小结">小结</h2>
+<ul><li>Guardian = 一个自动风险评估器，接成&quot;自动审批人&quot;插在问用户之前：low→放行、critical→拒、medium/high→升级。</li><li>风险四档 <code>low/medium/high/critical</code> 是真源码 <code>GuardianRiskLevel</code> 的真实变体；产物 <code>GuardianAssessment</code> 是结构化 JSON。</li><li>真 Guardian 是一个 fork 会话、读转录、返回严格 JSON 的<strong>评审 LLM 子 agent</strong>，永远 fail-closed，带熔断器防失控。</li><li>它是 Codex 与 Claude Code 最鲜明的差异（⭐）：用&quot;第二个 AI&quot;替缺席的用户把关，为没人盯着时放大自主度而生。</li><li>它叠在审批（<a href="../s04_approval/index.html">s04</a>）/ 沙箱（<a href="../s05_sandbox/index.html">s05</a>）之上、不取代它们，且用户始终可覆盖。</li><li><strong>生产级</strong>：给把关的 AI 上保险——fail-closed（超时/崩溃/解析失败一律拒）、熔断器（<code>MAX_CONSECUTIVE_*=3</code> 防空转）、严格 JSON 契约 + 超时，并诚实承认&quot;同源模型可能被同样的注入骗过&quot;（见「生产级」一节）。</li><li>下一站 <a href="../s15_mcp/index.html">s15 MCP：客户端 + 服务端</a>：给 agent 接上外部工具生态——而 Guardian 的 <code>McpToolCall</code> 评审，评的正是这些外来工具。</li></ul>
+<h2 id="思考">思考</h2>
+<ol><li>Guardian 用&quot;第二个 AI&quot;给&quot;第一个 AI&quot;把关。可这两个 AI 往往是同一家、同代的模型——如果第一个会被某条注入诱导，第二个会不会被同样的手法骗过？&quot;用 AI 审 AI&quot;在什么前提下才真的增加了安全，而不只是增加了一层同源的盲点？</li></ol>
+<ol><li>真 Guardian 永远 fail-closed：超时/出错/解析失败一律判拒。这对安全是对的，但放在 CI 里——一次评审超时就拦下一个本来没问题的部署命令。当&quot;宁可错杀&quot;撞上&quot;流水线要绿&quot;，你会怎么设计降级策略？错杀的代价和漏放的代价，在你的场景里哪个更高？</li></ol>
+<ol><li>本章把风险写成确定的规则；真 Guardian 的风险是模型现判的，意味着<strong>同一条命令，两次评审可能给出不同档位</strong>。这种不确定性，对一个本该&quot;守规矩&quot;的安全层来说是 bug 还是 feature？你愿意要一个偶尔判错但能理解上下文的评审员，还是一个永远一致但只会匹配字符串的规则表？</li></ol>
+<ol><li>Claude Code 让用户自己判风险，Codex 派 AI 替用户判。前者尊重人的判断但要求人在场，后者解放了人但把判断权让渡给了模型。当 Guardian 帮你拦下/放行了成百上千条命令而你一条都没看过，你对这个系统的&quot;信任&quot;到底是建立在什么之上的？这种信任和你对 Claude Code 弹窗的信任，是同一种东西吗？</li></ol>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

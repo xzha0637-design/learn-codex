@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s10: SQ/EQ Protocol — 提交队列与事件队列</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s10-sqeq-protocol-提交队列与事件队列">s10: SQ/EQ Protocol — 提交队列与事件队列</h1>
+<blockquote><em>&quot;事件向外流，操作向内流；core 与前端各管各的。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s09_responses_api/index.html">Responses API</a> → <strong>本章</strong> → <a href="../s11_frontends/index.html">前端：TUI + exec</a></p>
+<hr>
+<h2 id="先把思想说透把该做什么和发生了什么彻底分家一个脑子才能配多张脸">先把思想说透：把「该做什么」和「发生了什么」彻底分家，一个脑子才能配多张脸</h2>
+<p>到这一章为止，我们的循环一直是「调个函数、等它返回」——简单直接，但有个隐藏的硬伤。设想一个再正常不过的需求：agent 正干到一半，模型说「我想跑 <code>rm -rf build/</code>」，这时你得<strong>当场拦住它问一句「批不批」</strong>，等你点头才让它真跑。用「调函数等返回」的写法，你会发现这件事<strong>根本做不到</strong>。本章就是从这个做不到出发，一步步逼出 Codex 的架构脊梁。三层道理。</p>
+<p><strong>道理一：函数调用是一根「焊死的直管」——一旦进去就一路冲到底，中途插不进任何人。</strong> <code>output = run_shell(cmd)</code> 这一行，调用的瞬间它就闷头把命令跑完、把结果吐出来，<strong>从「决定要跑」到「真的跑了」之间，没有任何缝隙</strong>。可「审批」这件事，恰恰需要的就是这道缝：在「想跑」和「跑了」中间，停下来、让一个人介入、等他表态。同理还有「跑到一半我想喊停」「它还在忙我想追加一句话」——这些全都要求「在一件事进行的途中插进来」。直管式的函数调用结构上就排斥这种插入，这不是写得不够好，是这种形状本身的死穴。</p>
+<p><strong>道理二：解法是把「我要做什么」和「我这边发生了什么」拆成两股独立的流，中间留出可介入的缝。</strong> 既然一根直管不行，那就把它<strong>剖成来回两股</strong>：一股专门承载「外面想让 core 做的事」——用户敲了句话、用户批了这条命令、用户要打断（这是「该做什么」，向里流）；另一股专门承载「core 这边发生了什么」——回合开始了、我想跑这条命令请批准、命令输出来了、我说了一句话（这是「发生了什么」，向外流）。各自排成一条队，一进一出、互不阻塞。于是关键的那道缝出现了：core 可以在向外那条流上喊一声「我想跑这条、批不批」，然后<strong>就地停住、等着</strong>；而批准与否，会顺着向里那条流，作为一条独立的消息<strong>晚一点</strong>送回来。审批于是不再是「一次函数调用」，而是「一条消息出去 + 一条消息回来」——正因为拆成了两条流上的两张纸条，这个「问」才插得进一个正在进行的回合中间。打断、中途追加输入，靠的也是同一道缝。</p>
+<p><strong>道理三（最关键）：这一拆，顺带把 core 和「界面」彻底解了耦——一个脑子从此能配许多张脸。</strong> 你再回看上面那两股流：向里的一股，core 根本不在乎这条「该做什么」是从谁那儿来的——是终端里敲的、是 CI 脚本喂的、还是 IDE 通过网络发来的，对 core 都一个样；向外的一股，core 也不管这条「发生了什么」最后被谁、被画成什么样子。换句话说，<strong>core 只跟这两条流打交道，从此再不需要知道界面长什么样</strong>。这一下就解锁了 Codex 真正想要的形态：<strong>同一套 core 逻辑，背后接好几张不同的脸</strong>——终端里带颜色的交互界面、CI 里跑完就退的命令行、IDE 插件背后的服务进程，它们提交的是同一种「该做什么」、消费的是同一股「发生了什么」。一个后厨，配多个前厅，共用同一套做菜流程。「界面无关」和「回合中途可介入」这两件大事，其实是同一刀切下去的两面。</p>
+<p>把三点连起来：直管插不进人 → 于是剖成「该做什么 / 发生了什么」两条流、缝里能塞进人类决定 → 而这一拆又让 core 与界面解耦、一个脑子配多张脸。这两条流，就是本章标题里的「提交队列 / 事件队列」，也是后面一切的地基。</p>
+<h2 id="问题">问题</h2>
+<p>s01 的循环是「调函数、拿返回值」——前端和 core 焊死在一起。可真实的 Codex 要做到：</p>
+<ul><li>在<strong>一个回合进行到一半</strong>时弹出审批（&quot;要跑 <code>rm</code>，批不批？&quot;），等用户回应再继续；</li><li>随时<strong>打断</strong>（Interrupt）正在跑的回合；</li><li>让 <strong>TUI、<code>codex exec</code>、app-server（IDE 后端）三种前端共用同一套 core 逻辑</strong>。</li></ul>
+<p>直接 <code>return</code> 一个结果，这些都做不到——你没法在函数返回中途插进一个人类决定。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>把输入和输出各自拆成一条队列：</p>
+<pre><code>  前端 (TUI / exec / IDE)                     Session (core)
+        │                                          │
+        │   submit Op  ──────────────▶  Submission Queue (SQ)
+        │   (user_input / exec_approval / interrupt)│
+        │                                          │  处理 Op、产出 Event
+        │   render Event ◀────────────  Event Queue (EQ)
+        │   (turn_started / exec_begin / agent_message / ...)</code></pre>
+<p>core 只关心「消费 Op、产出 Event」，完全不知道前端长什么样；前端只关心「渲染 Event、提交 Op」。中间用两条队列彻底解耦。</p>
+<p>教学版只取了三种最有代表性的 Op（前端能提交的动作），先认个脸：</p>
+<table><thead><tr><th>Op</th><th>什么时候发</th><th>干什么</th></tr></thead><tbody><tr><td><code>user_input</code></td><td>你敲完一句话回车</td><td>开启一个回合</td></tr><tr><td><code>exec_approval</code></td><td>core 问&quot;批不批&quot;、你答完</td><td>把审批决定送回 core</td></tr><tr><td><code>interrupt</code></td><td>你按下打断（如 Esc / Ctrl-C）</td><td>喊停正在跑的回合</td></tr></tbody></table>
+<p>（真 Codex 的 Op 有十几种，这里只够把&quot;问—答—停&quot;这条主线讲清楚；完整清单见下方&quot;深入&quot;。）</p>
+<p><strong>为什么是两条队列，而不是一个函数？</strong> 拿 s01 的写法对照一下就懂了：</p>
+<pre><code class="language-python"># s01 的同步写法：前端和 core 焊死，一行 return 定生死
+output = run_shell(cmd)          # core 直接执行、直接返回，中间没有任何缝隙
+
+# s10 的双队列写法：执行被拆成&quot;问一声&quot;和&quot;得到答复&quot;两半
+yield  Event(&quot;exec_approval_request&quot;, command=cmd)   # ← core 把&quot;请批准&quot;丢出去，然后挂起
+decision = ...                                        # ← 这里是一道缝：可以塞进一个人类决定
+if decision == &quot;approved&quot;: run_shell(cmd)            # ← 拿到答复才执行</code></pre>
+<p><code>run_shell(cmd)</code> 这种写法里，<strong>函数一旦被调用就一路跑到底</strong>，你没有任何机会在&quot;决定要跑&quot;和&quot;真的跑了&quot;之间插进一个人。而双队列把这两件事拆到了两条传送带上：core 在 EQ 上喊&quot;我想跑这条、批不批&quot;，然后<strong>停下来等</strong>；前端慢慢悠悠地问完用户，再从 SQ 把答复送回来。这道&quot;缝&quot;——就是审批、打断、回合中途追加输入这些能力的唯一藏身之处。</p>
+<blockquote>类比：同步函数像<strong>自动门</strong>，人一靠近就开，关不住；双队列像<strong>门铃 + 对讲机</strong>——按铃（Event 出）、屋里的人决定开不开（Op 回）、再开门（执行）。多了一道人能介入的环节。</blockquote>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>。本章用 Python 生成器把两条队列讲清楚——<strong><code>yield</code> 就是 EQ（事件流出），<code>.send()</code> 就是 SQ（决定流入）</strong>：</p>
+<pre><code class="language-python">def run_session(messages):
+    yield ev(&quot;turn_started&quot;)
+    ...
+    for tc in resp.tool_calls:
+        decision = yield ev(&quot;exec_approval_request&quot;, command=command)  # 事件出 → 决定入
+        if decision == &quot;approved&quot;:
+            yield ev(&quot;exec_begin&quot;, command=command)
+            output = run_shell(command)
+            yield ev(&quot;exec_end&quot;, output=output)</code></pre>
+<p>前端 <code>drive()</code> 消费事件；遇到 <code>exec_approval_request</code> 就构造一条 <code>Op(&quot;exec_approval&quot;)</code> 把决定 <code>send</code> 回去。<code>Op</code> / <code>Event</code> 两个 dataclass 对应真源码 <code>../../codex/codex-rs/protocol/src/protocol.rs</code> 里的 <code>Op</code> 与 <code>EventMsg</code> 两套枚举（这里只取最小子集）。</p>
+<p><strong>走一遍。</strong> 我们跟着 <code>--demo</code> 里那一个回合，看两条传送带上<strong>每张纸条到底长什么样</strong>、以及<strong>为什么</strong>要这样传。用户的话是「执行 <code>echo SQ/EQ works</code>」。</p>
+<ol><li>前端把用户输入做成一张 <strong>Op 纸条</strong>，丢进 SQ（向里）：</li></ol>
+<pre><code class="language-json">   { &quot;op&quot;: &quot;user_input&quot;, &quot;text&quot;: &quot;执行 `echo SQ/EQ works`&quot; }</code></pre>
+<p>   core 收到后开始一个回合。<strong>为什么是纸条而不是函数参数？</strong> 因为前端和 core 可能根本不在同一个线程/进程里（真 Codex 里它们是两个 tokio 任务），只能靠传纸条沟通。</p>
+<ol><li>core 先往 EQ（向外）丢一张 <strong>Event</strong>，告诉前端&quot;开张了&quot;：</li></ol>
+<pre><code class="language-json">   { &quot;event&quot;: &quot;turn_started&quot; }</code></pre>
+<p>   前端收到就可以画个&quot;思考中…&quot;的提示。</p>
+<ol><li>模型决定要跑 <code>echo SQ/EQ works</code>。注意：<strong>core 不会自己偷偷跑</strong>，而是先停下来，往 EQ 丢一张&quot;请批准&quot;的 Event：</li></ol>
+<pre><code class="language-json">   { &quot;event&quot;: &quot;exec_approval_request&quot;, &quot;command&quot;: &quot;echo SQ/EQ works&quot; }</code></pre>
+<p>   在代码里，这一步就是那行 <code>decision = yield ev(&quot;exec_approval_request&quot;, ...)</code>——<code>yield</code> 把事件<strong>送出去</strong>，然后<strong>就地挂起</strong>，等一个决定送回来。<strong>为什么要挂起？</strong> 这正是双队列的意义：回合卡在半路，等一个人类决定，而不是闷头执行。</p>
+<ol><li>前端看到这张&quot;请批准&quot;的 Event，问用户（demo 里自动答 approved），把决定做成一张 <strong>Op 纸条</strong>送回 SQ（向里）：</li></ol>
+<pre><code class="language-json">   { &quot;op&quot;: &quot;exec_approval&quot;, &quot;decision&quot;: &quot;approved&quot; }</code></pre>
+<p>   代码里就是 <code>.send(&quot;approved&quot;)</code>——它变成第 3 步那个 <code>yield</code> 的返回值 <code>decision</code>，回合从挂起处<strong>原地复活</strong>。</p>
+<ol><li>拿到 <code>approved</code>，core 才真正执行，并把过程拆成两张 Event 丢回 EQ：</li></ol>
+<pre><code class="language-json">   { &quot;event&quot;: &quot;exec_begin&quot;, &quot;command&quot;: &quot;echo SQ/EQ works&quot; }
+   { &quot;event&quot;: &quot;exec_end&quot;,   &quot;output&quot;: &quot;SQ/EQ works\n&quot; }</code></pre>
+<p>   前端据此先显示&quot;正在跑这条命令&quot;、再显示输出。</p>
+<p>把这一趟连起来看：<strong>Op 从前端流向 core（user_input、exec_approval），Event 从 core 流向前端（turn_started、exec_approval_request、exec_begin、exec_end）</strong>——一进一出，泾渭分明。而&quot;在第 3 步挂起、第 4 步靠一张外部纸条复活&quot;这件事，就是为什么 Codex 能&quot;在模型流式输出的同时，插进一个人类的审批决定&quot;——这是普通的&quot;调函数拿返回值&quot;做不到的。</p>
+<h2 id="生产级队列要扛得住产得比消费快">生产级：队列要扛得住&quot;产得比消费快&quot;</h2>
+<p>把 core 和前端用两条队列（SQ 提交 / EQ 事件）解耦，最大的好处是异步；但异步立刻带来三个生产级问题：</p>
+<ul><li><strong>背压（backpressure）</strong>：模型流式吐 event 可能比一个慢前端（卡顿的 IDE、被重定向到磁盘的 <code>codex exec</code>）消费得快。若事件队列<strong>无界</strong>，积压会一路吃内存直到 OOM。生产级要么用<strong>有界队列</strong>（满了就让生产侧等一等，把&quot;快&quot;压下来），要么明确丢弃可丢的中间事件——而不能假装下游永远跟得上。</li><li><strong>顺序保证</strong>：同一回合的 <code>reasoning → function_call → output → completed</code> 必须<strong>按序</strong>到达前端，否则 UI 会渲染出错乱的因果。事件流的顺序是协议的一部分（<a href="../../codex/codex-rs/protocol/src/protocol.rs"><code>protocol.rs</code></a> 的 <code>EventMsg</code>），不是&quot;尽力而为&quot;。</li><li><strong>中断要插得进队</strong>：用户 <code>Op::Interrupt</code>（<a href="../s01_agent_loop/index.html">s01</a> 提过）得能<strong>及时</strong>穿过提交队列、打断正在跑的回合——这要求队列别被前面的活堵死到中断都递不进去。</li></ul>
+<blockquote>一句话：双队列给了你解耦，但你得替它回答&quot;下游慢了怎么办&quot;。<strong>有界 + 有序 + 可中断</strong>，才是一条能上生产的事件流，而不只是 demo 里的一个 <code>yield</code>。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>循环形态</td><td>较直接的「请求→响应」循环</td><td><strong>SQ/EQ 双队列</strong>，core 与前端解耦</td></tr><tr><td>审批</td><td>同步弹窗，挡在执行前</td><td>审批是一条 <code>Event</code> 出、一条 <code>Op</code> 回，<strong>异步插进流式回合</strong></td></tr><tr><td>前端数量</td><td>单一 CLI/TUI</td><td>TUI + <code>codex exec</code> + app-server <strong>共用同一个 core</strong></td></tr><tr><td>打断/中途输入</td><td>受限</td><td>随时提交 <code>Interrupt</code> / 追加输入的 <code>Op</code></td></tr></tbody></table>
+<p><strong>为什么？</strong> Codex 设想的运行形态是「<strong>一个 core，多个前端</strong>」：终端里是 TUI、CI 里是 <code>codex exec</code>、IDE 里是 app-server，它们必须复用同一套回合逻辑。要让它们都能「在模型流式输出的同时插入人类决定（审批/打断）」，就不能用「函数调用返回值」这种同步耦合，只能把输入输出拆成两条队列。Claude Code 更偏单一交互式前端，循环可以写得更直接。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<p>真协议在 <a href="../../codex/codex-rs/protocol/src/protocol.rs"><code>protocol/src/protocol.rs</code></a>，<code>Op</code> 与 <code>EventMsg</code> 都是很大的枚举。教学版各取了三四个变体。</p>
+<details>
+<summary>一、Op 远不止 3 种</summary>
+<p>真 <code>Op</code> 包含 <code>UserInput</code>、<code>Interrupt</code>、<code>ExecApproval</code>、<code>PatchApproval</code>、<code>Compact</code>、<code>ThreadRollback</code>、<code>Review</code>、<code>RunUserShellCommand</code>、<code>ReloadUserConfig</code>、<code>RefreshMcpServers</code>、<code>ResolveElicitation</code>…… 每一种都是前端能提交的一类动作。教学版只取了 <code>user_input / exec_approval / interrupt</code>。</p>
+</details>
+<details>
+<summary>二、EventMsg 是细粒度的</summary>
+<p>真 <code>EventMsg</code> 有 <code>TurnStarted/TurnComplete</code>、<code>AgentMessage</code>、<code>AgentReasoning</code>、<code>ExecCommandBegin</code> / <code>ExecCommandOutputDelta</code> / <code>ExecCommandEnd</code>、<code>ApplyPatchApprovalRequest</code>、<code>PatchApplyBegin/End</code>、<code>McpToolCallBegin/End</code>…… 尤其 <code>OutputDelta</code> 让前端能<strong>流式</strong>显示命令输出，而教学版把这些合并/省略了。</p>
+</details>
+<details>
+<summary>三、生成器只是教具，真实是异步 channel</summary>
+<p>教学版用 Python 生成器的 <code>yield</code>/<code>send</code> 模拟两条队列——这是<strong>协作式</strong>的：只有 Session 主动让出控制权，前端才能插话。真 Codex 用 tokio 的 <code>mpsc</code> channel：Session 在一个任务里跑、前端在另一个任务里收发，因此能<strong>真正异步</strong>地在回合进行中打断或审批。</p>
+</details>
+<details>
+<summary>四、同一套 Event 喂三个前端</summary>
+<p><code>TUI</code>、<code>codex exec</code>（s11）、<code>app-server</code>（IDE 后端）都是同一条 <code>EventMsg</code> 流的消费者；<code>Submission</code> 也可来自不同来源（键盘 / stdin / WebSocket）。一套 core，多个皮。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s10_sq_eq_protocol/code.py --demo   # 看事件流出(EQ) + 审批流入(SQ)
+python s10_sq_eq_protocol/code.py          # 交互模式：每条命令都问你批不批</code></pre>
+<p><code>--demo</code> 完全离线（不调真模型），跑完上面&quot;走一遍&quot;里那一整趟。你会看到事件一条条<strong>流出</strong>（turn_started → exec_approval_request → exec_begin → exec_end），中间夹着一条审批决定<strong>流回</strong>。把它对照&quot;走一遍&quot;的五步读，双队列的进出方向就具象了。交互模式则把第 4 步的&quot;自动 approved&quot;换成真的问你 <code>y/N</code>——你就是那个站在缝里做决定的人。</p>
+<h2 id="小结">小结</h2>
+<ul><li>把「提交（Op）」和「事件（Event）」拆成两条队列，core 与前端彻底解耦。</li><li>这层解耦正是「回合中审批 / 打断 / 多前端」的前提——也是 Codex 的架构脊梁。</li><li><strong>生产级</strong>：异步队列要扛住&quot;产得比消费快&quot;——背压（有界队列防 OOM）、严格的事件顺序、中断能及时插进队（见「生产级」一节）。</li><li>下一站 <a href="../s11_frontends/index.html">s11 前端：TUI + exec</a>：把这套 core 接上真正的前厅——同一条 Event 流，喂给 TUI 和 <code>codex exec</code> 两个皮。</li></ul>
+<h2 id="思考">思考</h2>
+<div class="think">
+<ol><li>生成器的 <code>yield/send</code> 是协作式的——只有 Session 让出控制权，前端才能插话。真异步 channel 允许前端<strong>随时</strong>提交 <code>Interrupt</code>。在&quot;打断一条卡死的命令&quot;这件事上，两者表现差在哪？</li><li>三个前端同时连到一个 Session、各自提交 <code>Op</code>，事件该广播给谁？冲突如何收敛？</li><li>把&quot;审批&quot;建模成一条 Event + 一条 Op（而不是一个同步函数调用），能让审批 UI 长成什么样子？（想想：把审批推到你手机上点&quot;同意&quot;。）</li><li>Claude Code 不用这么重的队列协议也能工作。它因此牺牲了什么、又换来了什么？</li></ol>
+</div>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

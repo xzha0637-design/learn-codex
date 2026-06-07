@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learn Codex —— 从 0 到 1 拆解 OpenAI Codex 的 Agent Harness</title>
+<link rel="stylesheet" href="assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="learn-codex-从-0-到-1-拆解-openai-codex-的-agent-harness">Learn Codex —— 从 0 到 1 拆解 OpenAI Codex 的 Agent Harness</h1>
+<blockquote>用 <a href="../learn-claude-code/index.html">learn-claude-code</a> 的「分解模式」拆解 <strong>OpenAI Codex</strong>： 每章一个『问题 → 方案 → 原理 → 可跑代码』，从一个循环长成一个完整 harness。 所有实现都对照本地真源码（<code>../codex/codex-rs</code>），并<strong>逐章对比 Claude Code：哪里不同、为什么</strong>。</blockquote>
+<pre><code>                    THE AGENT PATTERN（两家共通的底座）
+                    ===================================
+
+   user ──▶ messages[] ──▶  MODEL  ──▶ response
+                              │
+                       有 tool_call ?
+                       /            \
+                     是              否 ──▶ 返回文本
+                     │
+              执行工具 → 结果回灌 ──▶ 回到 messages[]
+
+   循环不变。变的是：工具长什么样、命令怎么被关、对话怎么被表示、
+   会话怎么被存、前端怎么消费事件 —— 这些 harness 选择，正是 Codex 和
+   Claude Code 分道扬镳的地方。</code></pre>
+<hr>
+<h2 id="这是什么">这是什么</h2>
+<p>Claude Code 和 Codex 都是「<strong>模型 + harness</strong>」：Agency（感知-推理-行动的能力）来自模型训练，而 harness 是让模型能在终端/文件系统里干活的那层基础设施。learn-claude-code 已经把 Claude Code 这套 harness 拆给你看了。</p>
+<p><strong>learn-codex 拆另一台载具：OpenAI Codex。</strong> 它和 Claude Code 共享同一个回合循环底座，但在几乎每一个 harness 选择上都做了不同的取舍。本课程的主线就是：<strong>把这些不同一条条摆出来，并解释为什么。</strong></p>
+<blockquote>和 learn-claude-code 的关系：那个项目是 Python 从零复刻 Claude Code 的概念；本项目同样用 Python 从零复刻 <strong>Codex</strong> 的概念，并把真源码（Rust，<code>../codex/codex-rs</code>）作为事实依据，确保教的是 Codex 真正的做法，而不是换皮。</blockquote>
+<hr>
+<h2 id="-核心对比codex-vs-claude-code以及为什么">🆚 核心对比：Codex vs Claude Code（以及为什么）</h2>
+<table><thead><tr><th>维度</th><th>Claude Code</th><th>OpenAI Codex</th><th>为什么不同</th></tr></thead><tbody><tr><td><strong>语言 / 开放性</strong></td><td>TypeScript/JS，闭源</td><td><strong>Rust，开源</strong>（你本地这份）</td><td>Codex 把性能、内核级沙箱、可审计作为一等公民 → 选 Rust + 开源</td></tr><tr><td><strong>线协议</strong></td><td>Anthropic Messages API（<code>tool_use</code> / <code>tool_result</code> 内容块）</td><td><strong>OpenAI Responses API</strong>（<code>function_call</code> / <code>function_call_output</code> item + reasoning）</td><td>各用自家模型与 API；Responses 的 item 流更贴合流式与推理 → 见 <a href="./s09_responses_api/index.html">s09</a></td></tr><tr><td><strong>改文件</strong></td><td><code>Edit</code>（精确串替换）/ <code>Write</code> / <code>MultiEdit</code></td><td><strong><code>apply_patch</code></strong>（<code>*** Begin Patch</code> 补丁信封，增/改/删/移一次搞定）</td><td>工具贴合模型被训练的输出习惯；补丁天生可审查/回滚 → 见 <a href="./s03_apply_patch/index.html">s03</a></td></tr><tr><td><strong>安全第一道防线</strong></td><td>审批弹窗 + 路径校验（<strong>应用层</strong>）</td><td><strong>内核强制沙箱</strong>（macOS Seatbelt / Linux Landlock+seccomp，<strong>内核层</strong>）</td><td>Codex 要在低/无人工审批下也安全（headless、CI、云端）→ 见 <a href="./s05_sandbox/index.html">s05</a></td></tr><tr><td><strong>整体架构</strong></td><td>较直接的循环</td><td><strong>SQ/EQ 队列协议</strong>：提交队列与事件队列解耦，喂多个前端</td><td>解耦让 TUI / <code>codex exec</code> / app-server 共用同一个 core → 见 <a href="./s10_sq_eq_protocol/index.html">s10</a></td></tr><tr><td><strong>前端</strong></td><td>单一 CLI/TUI</td><td>TUI + <code>codex exec</code> 无头 + app-server（IDE 后端），都只是事件消费者</td><td>多入口（终端、CI、IDE、云）→ 见 <a href="./s11_frontends/index.html">s11</a></td></tr><tr><td><strong>项目记忆</strong></td><td><code>CLAUDE.md</code></td><td><strong><code>AGENTS.md</code></strong>（从 cwd 逐级向上收集并注入）</td><td>同思路、不同约定；Codex 推动了 AGENTS.md 这一跨工具标准 → 见 <a href="./s06_agents_md/index.html">s06</a></td></tr><tr><td><strong>会话持久化</strong></td><td>会话历史</td><td><strong>Rollout</strong>（SQLite + zstd，可 resume / rewind / compact）</td><td>可续接、可回滚、可审计 → 见 <a href="./s08_rollout/index.html">s08</a></td></tr><tr><td><strong>审批粒度</strong></td><td>危险操作弹窗</td><td>审批策略 <code>untrusted/on-failure/on-request/never</code> + Guardian 自动风险评估</td><td>要在不同自主度档位间精细切换 → 见 <a href="./s04_approval/index.html">s04</a>/<a href="./s14_guardian/index.html">s14</a></td></tr><tr><td><strong>扩展</strong></td><td>skills / subagents / hooks / MCP</td><td>MCP（<strong>客户端 + 服务端</strong>）/ plugins / hooks / guardian</td><td>Codex 既连别人，也能<strong>被别人当工具</strong> → 见 <a href="./s15_mcp/index.html">s15</a></td></tr></tbody></table>
+<h3 id="把为什么收成一句话">把&quot;为什么&quot;收成一句话</h3>
+<p>两家公司下了不同的注：</p>
+<ul><li><strong>Codex 押&quot;自主&quot;</strong>：开源 Rust + 内核沙箱 + 无头友好。它设想的场景是「<strong>没人盯着也要安全干活</strong>」——CI 流水线、云端 Codex、IDE 后端。没人审批时，唯一可靠的防线是把安全<strong>下沉到内核</strong>，把改动表达成<strong>可审计的补丁</strong>，把会话<strong>存进 rollout</strong> 以便回放。</li><li><strong>Claude Code 押&quot;协作&quot;</strong>：闭源 + 交互式审批 UX + bash 为中心。它设想的场景是「<strong>人和 agent 并肩</strong>」——危险操作弹窗问你，由人把最后一道关，体验尽量流畅。</li></ul>
+<p>而<strong>模型差异直接决定工具差异</strong>：<code>apply_patch</code> vs 串替换，不是谁更聪明，而是 OpenAI 和 Anthropic 把不同的&quot;编辑习惯&quot;训进了各自的模型——好的 harness 让工具去贴合模型，而不是反过来。</p>
+<blockquote>这条主线会在每一章的「🆚 与 Claude Code 的不同」小节里具体展开。</blockquote>
+<hr>
+<h2 id="课程路线图17-章主线-进阶专题-难度单调爬升">课程路线图（17 章主线 + 进阶专题 · 难度单调爬升）</h2>
+<p><code>≈</code> = 与 Claude Code 大体相同　<strong>⭐</strong> = Codex 独有 / 差异显著（本课程重点）。每个部分内部由易到难，整体半径递增——这套递进借鉴了 learn-claude-code「能力→控制→由内向外→集成→综合」的编排哲学。</p>
+<p><strong>Part 1 · 给它一双手，再套上缰绳</strong></p>
+<table><thead><tr><th>章</th><th>主题</th><th>一句格言</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s01_agent_loop/index.html">s01</a></td><td>回合循环</td><td>一个循环就够了</td><td>≈</td></tr><tr><td><a href="./s02_tool_use/index.html">s02</a></td><td>工具与分发</td><td>加工具只加 handler</td><td>≈</td></tr><tr><td><a href="./s03_apply_patch/index.html">s03</a></td><td>apply_patch</td><td>把改动装进补丁信封</td><td>⭐</td></tr><tr><td><a href="./s04_approval/index.html">s04</a></td><td>审批策略</td><td>先划边界，再给自由</td><td>⭐</td></tr><tr><td><a href="./s05_sandbox/index.html">s05</a></td><td>Seatbelt 沙箱</td><td>应用层挡不如内核层关</td><td>⭐</td></tr></tbody></table>
+<p><strong>Part 2 · agent 的脑子（上下文与记忆）</strong></p>
+<table><thead><tr><th>章</th><th>主题</th><th>一句格言</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s06_agents_md/index.html">s06</a></td><td>AGENTS.md</td><td>项目规矩，逐级向上捡</td><td>⭐</td></tr><tr><td><a href="./s07_context_compaction/index.html">s07</a></td><td>上下文压缩</td><td>上下文总会满，腾地方</td><td>≈</td></tr><tr><td><a href="./s08_rollout/index.html">s08</a></td><td>Rollout 续接</td><td>会话存盘，随时续上</td><td>⭐</td></tr></tbody></table>
+<p><strong>Part 3 · 掀开引擎盖（协议与架构）</strong></p>
+<table><thead><tr><th>章</th><th>主题</th><th>一句格言</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s09_responses_api/index.html">s09</a></td><td>Responses API</td><td>模型到底怎么被调用</td><td>⭐</td></tr><tr><td><a href="./s10_sq_eq_protocol/index.html">s10</a></td><td>SQ/EQ 协议</td><td>提交与事件拆成两队列</td><td>⭐</td></tr></tbody></table>
+<p><strong>Part 4 · 前端与扩展</strong></p>
+<table><thead><tr><th>章</th><th>主题</th><th>一句格言</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s11_frontends/index.html">s11</a></td><td>前端：TUI + exec</td><td>前端只是事件的消费者</td><td>⭐</td></tr><tr><td><a href="./s12_tools_extra/index.html">s12</a></td><td>更多工具：plan / web / image</td><td>再加几个工具</td><td>≈</td></tr><tr><td><a href="./s13_hooks/index.html">s13</a></td><td>Hooks</td><td>挂在循环上，不写进循环里</td><td>≈</td></tr></tbody></table>
+<p><strong>Part 5 · 进阶（护栏 · 多智能体 · 集成）</strong></p>
+<table><thead><tr><th>章</th><th>主题</th><th>一句格言</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s14_guardian/index.html">s14</a></td><td>Guardian</td><td>没人时，派个 AI 把关</td><td>⭐</td></tr><tr><td><a href="./s15_mcp/index.html">s15</a></td><td>MCP：客户端 + 服务端</td><td>能力不够就插，也能被别人插</td><td>⭐</td></tr></tbody></table>
+<p><strong>Part 6 · 收尾</strong></p>
+<table><thead><tr><th>章</th><th>主题</th><th>一句格言</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s16_config/index.html">s16</a></td><td>Config 与 Profiles</td><td>预设档位一键切换</td><td>⭐</td></tr><tr><td><a href="./s17_comprehensive/index.html">s17</a></td><td>综合：迷你 Codex</td><td>机制很多，循环一个</td><td>—</td></tr></tbody></table>
+<p><strong>进阶专题 · 当一个 agent 不够用</strong></p>
+<table><thead><tr><th>章</th><th>主题</th><th>一句格言</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s18_multiagent/index.html">s18</a></td><td>多智能体：agent 通信</td><td>把通信做进协议，它就成了历史</td><td>⭐</td></tr></tbody></table>
+<blockquote><strong>当前状态：17 章主线 + 进阶专题 s18 已就位，均离线 <code>--demo</code> 可跑（18/18 退出 0）；另有两篇深入长文见下。</strong></blockquote>
+<hr>
+<h2 id="快速开始">快速开始</h2>
+<pre><code class="language-bash">cd learn-codex
+python3 s01_agent_loop/code.py --demo     # 回合循环
+python3 s03_apply_patch/code.py --demo    # 招牌编辑工具
+python3 s05_sandbox/code.py --demo        # 内核沙箱（macOS 上真实拦截越界写）</code></pre>
+<p><strong>默认 <code>backend=mock</code>：无需任何 key、无需联网</strong>，就能跑通每章的回合循环与机制演示。</p>
+<p>想体验真 Codex 线协议（OpenAI Responses API）：</p>
+<pre><code class="language-bash">pip install -r requirements.txt
+cp .env.example .env        # 填入 OPENAI_API_KEY，会自动切到 openai 后端</code></pre>
+<p>模型调用统一封装在 <a href="./codexlib.py">codexlib.py</a>（mock / openai 双后端）；每章<strong>独有的机制</strong>都内联在该章 <code>code.py</code> 里、可单文件通读。</p>
+<hr>
+<h2 id="浏览-html-版">浏览 HTML 版</h2>
+<p>每章 README 可一键转成带样式的网页（零依赖，纯 Python 解析器，支持表格 / 代码块 / <code>&lt;details&gt;</code> 折叠 / 引用式链接）：</p>
+<pre><code class="language-bash">python3 build_html.py        # 生成根 index.html + 各章 index.html + assets/codex.css</code></pre>
+<p>浏览器打开生成的 <code>index.html</code> 即可逐章阅读，每章文末都有「思考」反问。解析器本身（<a href="./build_html.py">build_html.py</a>）也是一份关于 Markdown 解析的小教学样本。</p>
+<hr>
+<h2 id="深入长文超长篇对比">深入长文（超长篇对比）</h2>
+<p>除章节外，<code>docs/</code> 下有几篇专门的 Claude Code vs Codex 深度对比长文：</p>
+<ul><li><a href="docs/api-message-vs-responses.html">Messages API vs Responses API 全解</a> —— 两套<strong>线协议</strong>逐格摊开：请求/对话形状/工具编码/推理携带/状态/流式/失败，每处差异都问「为什么」，全 <code>codex-rs</code> 源码行号 grounding。</li><li><a href="docs/context-cc-vs-codex.html">上下文处理全解</a> —— 注入 / 压缩 / 截断 / 持久化 / 记忆，逐层对比，含服务端压缩与 rollout 解耦。</li><li><a href="docs/subagent-multiagent-cc-vs-codex.html">子代理与多智能体全解</a> —— 分身与组队：CC 的文件收件箱队友团 vs Codex 的有身份线程网络（<strong>可跑骨架见 <a href="s18_multiagent/index.html">s18 多智能体</a></strong>）。</li></ul>
+<hr>
+<h2 id="毕业作品mini-codex把-18-章拼成一台能跑的载具">毕业作品：mini-codex（把 18 章拼成一台能跑的载具）</h2>
+<p>学完 18 章，<a href="mini_codex/index.html">mini_codex/</a> 把它们<strong>装配成一个分文件夹、模块化的迷你 Codex</strong>——不是又一个单文件 demo，而是 <code>tools/</code> <code>skills/</code> <code>hooks/</code> <code>safety/</code> <code>memory/</code> <code>persistence/</code> <code>session/</code> 各自独立成包的完整结构。</p>
+<pre><code class="language-bash">python3 -m mini_codex --demo</code></pre>
+<p>一条用户请求会穿过 <strong>配置 → AGENTS.md 注入 → 模型 → 钩子 → Guardian → 审批 → 沙箱 → 工具 → rollout 留底</strong> 九道关卡，每道关卡 emit 一个事件打印出来——模型只占其中一步。每个模块都带着对应章节的「生产级」那一层（schema 校验 / retry / fail-closed / 熔断 / append-only…）。详见 <a href="mini_codex/index.html">mini_codex/README.md</a>。</p>
+<hr>
+<h2 id="设计原则沿用-learn-claude-code">设计原则（沿用 learn-claude-code）</h2>
+<ol><li><strong>每章一个机制</strong>，配一句格言。</li><li><strong>代码可单文件通读</strong>：用 <code>FROM s01（搬运）</code> / <code>NEW in sNN</code> 横幅标出&quot;哪些是上一章带来的、哪些是本章新增&quot;。</li><li><strong>离线可跑</strong>：mock 后端让任何人零成本验证。</li><li><strong>对照真源码</strong>：每章注明对应的 <code>codex-rs</code> 文件，教的是 Codex 真正的做法。</li><li><strong>逐章对比 Claude Code</strong>：每章都有「🆚 与 Claude Code 的不同」，讲清差异与原因。</li><li><strong>深入对照 + 文末反问</strong>：每章配一段 <code>&lt;details&gt;</code>「教学版 vs 真 Codex 源码」深入对照，结尾用「思考」抛出开放式反问。</li><li><strong>面向初学者：讲思想，不背词汇</strong>：每章开头用「先把思想说透」把机制背后的道理讲通——多用类比、讲推理链，术语在叙述中自然带出，而非名词清单；「工作原理」里带一段「走一遍」的具体实例。难度按 6 个部分单调爬升。</li></ol>
+<hr>
+<h2 id="致谢">致谢</h2>
+<ul><li>形式与教学法致敬 <a href="https://github.com/shareAI-lab/learn-claude-code">shareAI-lab/learn-claude-code</a>。</li><li>事实依据来自 <a href="https://github.com/openai/codex">OpenAI Codex</a> 真源码（本仓库 <code>../codex</code>）。</li></ul>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

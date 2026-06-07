@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s08: Rollout — 把整场对话刻进磁盘</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s08-rollout-把整场对话刻进磁盘">s08: Rollout — 把整场对话刻进磁盘</h1>
+<blockquote><em>&quot;上下文是给模型看的草稿，rollout 是给世界留的底稿。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s07_context_compaction/index.html">s07 Context Compaction</a> → <strong>s08</strong> → <a href="../s09_responses_api/index.html">s09 Responses API</a></p>
+<hr>
+<h2 id="先把思想说透把模型现在看的和世界永久留的分成两份">先把思想说透：把「模型现在看的」和「世界永久留的」分成两份</h2>
+<p>上一章 <a href="../s07_context_compaction/index.html">s07</a> 为了省钱，会主动把旧对话压短、甚至替换成一句摘要。那问题就来了：如果喂给模型的历史越修越短，<strong>那场对话「到底发生过什么」，还有谁完整记得？</strong> 这一章的答案，藏在一个看似简单、却撑起 resume / rewind / 审计三件大事的设计里。想通下面三层就够了。</p>
+<p><strong>道理一：喂给模型的那份历史，是一份「可以损耗的工作副本」——它本来就不该是权威记录。</strong> 回想前几章：程序跑的时候，对话就是内存里的一个 <code>messages</code> 列表，它专门为「这一回合要喂给模型什么」服务。正因为是为模型服务，它就<strong>容许损耗</strong>：太长了要压（s07）、旧的要截、进程一退出它就烟消云散。把它当成草稿纸最贴切——你在上面写写画画、随时擦掉重写，方便当下思考，但<strong>没人指望草稿纸能留存</strong>。麻烦在于：如果整个系统<strong>只有</strong>这张草稿纸，那一关终端、一压缩，「这场对话干过什么」就永远找不回来了。</p>
+<p><strong>道理二：所以另存一份「只增不改、一字不漏」的底稿——它和草稿纸是两码事。</strong> 解法朴素得近乎笨：回合里每发生一件具体的事（你说一句话、模型说一句话、模型要跑一条命令、命令返回结果），就<strong>老老实实往一个文件末尾追加一行</strong>，从不回头改动已经写下的行。这份文件就是 rollout——一本<strong>逐条流水账</strong>。它和草稿纸的分工泾渭分明：草稿纸为「模型当下要看什么」服务，可以损耗；底稿为「世界事后要查什么」服务，必须完整。关键就两个动作：<strong>写，只在末尾追加（绝不篡改旧行）；读，从头按顺序回放。</strong> 「只追加」保证了历史不被改写——这正是日后能拿它当审计凭据的根基；写完一行就立刻逼它落到硬盘（而不是攒在缓冲区里），则保证进程哪怕下一秒崩掉，已经发生的事也稳稳躺在盘上、不会白跑。</p>
+<p><strong>道理三（最关键）：正是「草稿可损耗 / 底稿不可损耗」这一刀切开，才同时换来了续接、回退、审计三种能力。</strong> 为什么非要分这两份？因为一旦磁盘上有了一份「按回合切好、完整无缺」的底稿，三件原本做不到的事就全都顺理成章了：</p>
+<ul><li><strong>续接（resume）</strong>：把底稿从头读回来、重建成 <code>messages</code>，会话就能从上次断掉的地方接着跑——换台机器、隔几天都行，只要这个文件还在。</li><li><strong>回退（rewind）</strong>：底稿是按回合切分的，于是你能「砍掉最后 N 个回合、退回更早的状态重来」——模型钻进死胡同时尤其有用。</li><li><strong>审计</strong>：在云端、无人盯着的场景里出了问题，事后翻这本一字不漏的流水账，就能知道「它当时到底跑了哪条命令、模型怎么决策的」。</li></ul>
+<p>这三件事有一个共同的前提：<strong>磁盘上得有一份不会被压缩、不会被篡改的完整记录。</strong> 这恰好回应了上一章的隐忧——压缩尽管放心去修剪草稿（省 token），因为底稿这条线始终完整。两份记录各司其职、互不打架，这就是 rollout 的全部思想。</p>
+<h2 id="问题">问题</h2>
+<p>回合循环（<a href="../s01_agent_loop/index.html">s01</a>）跑得很好——但它把整场对话只存在<strong>内存里的一个 <code>messages</code> 列表</strong>。一旦进程退出，这场对话就烟消云散。这带来三个真实痛点：</p>
+<ol><li><strong>没法续上。</strong> 你跑了 40 分钟、agent 改了十几个文件，终端一关、CI 任务一结束，下次只能从零开始。</li><li><strong>没法回退。</strong> 模型在第 7 个回合钻进了死胡同，你想退回第 5 个回合重来——可你手里没有「第 5 个回合」这个东西。</li><li><strong>没法审计。</strong> 在云端 / 无人值守跑 agent，事后出了问题，你想知道「它当时到底执行了哪条命令、模型说了什么」——内存里的对话早没了。</li></ol>
+<p>更刁钻的是：<a href="../s07_context_compaction/index.html">s07</a> 的<strong>压缩</strong>为了省 token，会主动<strong>丢掉</strong>旧对话（把一段历史换成一句摘要）。喂给模型的上下文越修越短，可你要的「完整记录」反而被它破坏了。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>把对话<strong>逐条落盘</strong>：回合每产出一个 item（用户消息、模型消息、工具调用、工具结果），就<strong>追加一行</strong>到一个 rollout 文件。读回时把这些行<strong>回放</strong>成 <code>messages</code>，会话就能从断点继续。</p>
+<p>教学版用 JSONL（一行一个 item，append-only，肉眼可读）。文件长这样：</p>
+<pre><code>   rollout.jsonl  (append-only，每行一个 RolloutItem)
+   ┌────────────────────────────────────────────────────────┐
+   │ {&quot;timestamp&quot;: ..., &quot;type&quot;:&quot;session_meta&quot;, &quot;payload&quot;:{…}} │ ← 第一行：会话头
+   │ {&quot;timestamp&quot;: ..., &quot;type&quot;:&quot;response_item&quot;,&quot;payload&quot;:{    │
+   │     &quot;type&quot;:&quot;message&quot;,&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;…&quot;}}       │ ← 你说的话
+   │ {…&quot;type&quot;:&quot;function_call&quot;,&quot;name&quot;:&quot;shell&quot;,…}               │ ← 模型要跑的命令
+   │ {…&quot;type&quot;:&quot;function_call_output&quot;,&quot;output&quot;:&quot;…&quot;}            │ ← 命令的结果
+   │ {…&quot;type&quot;:&quot;message&quot;,&quot;role&quot;:&quot;assistant&quot;,&quot;content&quot;:&quot;…&quot;}     │ ← 模型的回复
+   └────────────────────────────────────────────────────────┘
+       │  record_items() 一边跑一边往下追加 ↑（写完即 flush）
+       │
+       ▼  resume(path) 逐行读回，跳过 session_meta
+   messages = [ {user…}, {function_call…}, {output…}, {assistant…} ]  → 接着跑</code></pre>
+<p>关键不是「存了」，而是：<strong>写是只追加、读是按序回放</strong>。压缩可以任意修剪内存里的上下文，rollout 这条底稿始终完整。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>，三件事：</p>
+<p><strong>第 1 步 — 起一个 recorder，先写会话头。</strong> 真 Codex 的 rollout 第一行永远是 <code>SessionMeta</code>（conversation_id、cwd、git 信息……）：</p>
+<pre><code class="language-python">class RolloutRecorder:
+    def __init__(self, path, meta=None):
+        self._write_line(&quot;session_meta&quot;, meta or {&quot;cwd&quot;: str(WORKDIR)})</code></pre>
+<p><strong>第 2 步 — 回合每产出 item 就追加一行，写完即 flush。</strong> 这正是真源码 <a href="../../codex/codex-rs/rollout/src/recorder.rs"><code>recorder.rs</code></a> 里 <code>JsonlWriter::write_line</code> 的语义（<code>write_all</code> 后立刻 <code>flush</code>）——崩溃也不丢已写部分：</p>
+<pre><code class="language-python">def _write_line(self, item_type, payload):
+    line = {&quot;timestamp&quot;: ..., &quot;type&quot;: item_type, &quot;payload&quot;: payload}
+    with self.path.open(&quot;a&quot;, encoding=&quot;utf-8&quot;) as f:
+        f.write(json.dumps(line, ensure_ascii=False) + &quot;\n&quot;)
+        f.flush()</code></pre>
+<p><code>run_turn(messages, recorder)</code> 在 s01 循环上只多了两行：模型产出后 <code>recorder.record_items(...)</code>、工具结果产出后再 <code>record_items([out_item])</code>。</p>
+<p><strong>第 3 步 — <code>resume(path)</code> 把行回放成 <code>messages</code>。</strong> 对应 <code>recorder.rs</code> 的 <code>get_rollout_history</code> / <code>load_rollout_items</code>：逐行解析，跳过 <code>session_meta</code>，把 <code>response_item</code> 的 payload 还原成对话 item，损坏行直接跳过：</p>
+<pre><code class="language-python">def resume(path):
+    messages = []
+    for raw in Path(path).read_text().splitlines():
+        line = json.loads(raw)                 # 损坏行 try/except 跳过
+        if line.get(&quot;type&quot;) == &quot;response_item&quot;:
+            messages.append(line[&quot;payload&quot;])
+    return messages</code></pre>
+<p><code>--demo</code> 完整跑一遍：录一轮 <code>echo</code> → 打印落盘的 5 行 JSONL → <code>resume</code> 回放 → 断言「还原出的 <code>messages</code> 和录制时逐字节一致」，证明会话可无损续上。</p>
+<p><strong>走一遍</strong> —— 跟着 <code>--demo</code> 看一条对话从「内存」到「磁盘」再回到「内存」，每步数据长什么样：</p>
+<ol><li><strong>起 recorder，写下第一行会话头。</strong> 用户说了句「执行 <code>echo hello from codex</code> 并告诉我结果」。recorder 先落一行 <code>session_meta</code>（会话头），再把用户消息落成一行 <code>response_item</code>：</li></ol>
+<pre><code class="language-json">   {&quot;timestamp&quot;:&quot;…Z&quot;,&quot;type&quot;:&quot;session_meta&quot;,&quot;payload&quot;:{&quot;cwd&quot;:&quot;…/learn-codex&quot;,&quot;conversation_id&quot;:&quot;demo-0001&quot;}}
+   {&quot;timestamp&quot;:&quot;…Z&quot;,&quot;type&quot;:&quot;response_item&quot;,&quot;payload&quot;:{&quot;type&quot;:&quot;message&quot;,&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;执行 `echo hello from codex` 并告诉我结果&quot;}}</code></pre>
+<p>   <em>为什么</em>第一行总是会话头：resume 时要先知道「这是哪场会话、在哪个目录」，再读后面的对话。</p>
+<ol><li><strong>回合每产出一个 item，就追加一行 + flush。</strong> 模型决定调 <code>shell</code>，跑完拿到结果，最后回一句。这三件事各落一行（注意全是<strong>追加</strong>，前面的行一个字没动）：</li></ol>
+<pre><code class="language-json">   {…&quot;type&quot;:&quot;response_item&quot;,&quot;payload&quot;:{&quot;type&quot;:&quot;function_call&quot;,&quot;call_id&quot;:&quot;mock_call_1&quot;,&quot;name&quot;:&quot;shell&quot;,&quot;arguments&quot;:&quot;{\&quot;command\&quot;: \&quot;echo hello from codex\&quot;}&quot;}}
+   {…&quot;type&quot;:&quot;response_item&quot;,&quot;payload&quot;:{&quot;type&quot;:&quot;function_call_output&quot;,&quot;call_id&quot;:&quot;mock_call_1&quot;,&quot;output&quot;:&quot;hello from codex&quot;}}
+   {…&quot;type&quot;:&quot;response_item&quot;,&quot;payload&quot;:{&quot;type&quot;:&quot;message&quot;,&quot;role&quot;:&quot;assistant&quot;,&quot;content&quot;:&quot;[mock] 工具已执行，结果片段：hello from codex&quot;}}</code></pre>
+<p>   <em>为什么</em>写完就 <code>flush()</code>：万一进程在这里崩了，已经跑过的命令和拿到的结果都已经稳稳躺在磁盘上，不会白跑。</p>
+<ol><li><strong>resume：逐行读回，跳过会话头，重建 <code>messages</code>。</strong> 文件现在有 5 行（1 行会话头 + 4 个对话 item）。<code>resume()</code> 逐行 <code>json.loads</code>，<strong>跳过 <code>session_meta</code></strong>，把 4 条 <code>response_item</code> 的 <code>payload</code> 取出来按序放进列表：</li></ol>
+<pre><code>   重建出 4 个对话 item：
+     [user]      执行 `echo hello from codex` 并告诉我结果
+     [call]      shell {&quot;command&quot;: &quot;echo hello from codex&quot;}
+     [output]    hello from codex
+     [assistant] [mock] 工具已执行，结果片段：hello from codex</code></pre>
+<p>   <em>为什么</em>跳过会话头：它是「关于这场会话的元信息」，不是对话内容本身，不能混进喂给模型的 <code>messages</code>。</p>
+<ol><li><strong>断言无损。</strong> demo 最后 <code>assert restored == messages</code>——读回来的列表和录制时<strong>逐字节一致</strong>。这就是「会话可无损续接」的硬证据：换台机器、隔几天，只要这个文件还在，对话就能从这里接着跑。</li></ol>
+<blockquote>对照真源码：这套「写一行 + flush」正是 <code>recorder.rs</code> 里 <code>JsonlWriter::write_line</code>（<code>write_all</code> 后立刻 <code>flush</code>）的语义；resume 对应 <code>get_rollout_history</code> / <code>load_rollout_items</code>。教学版省了 SQLite 索引和 zstd 压缩，但「append-only + 按序回放」的骨架一模一样。</blockquote>
+<h2 id="生产级留底要经得起断电append-only-flush-可重试">生产级：留底要经得起断电——append-only + flush + 可重试</h2>
+<p>rollout 是 Codex 的&quot;黑匣子&quot;：resume、rewind、审计全靠它。所以它最不能容忍的就是<strong>写丢</strong>。生产级的持久化盯三件事：</p>
+<ul><li><strong>append-only</strong>：每产出一个 item 就<strong>追加一行</strong>（<code>.append(true)</code>，<a href="../../codex/codex-rs/rollout/src/recorder.rs"><code>recorder.rs:727</code></a>），从不回头改已写的内容。崩溃最多丢<strong>最后一行</strong>（写到一半那条），前面的全都在——重放时跳过损坏的尾行即可。这就是 append-only 比&quot;整文件覆盖&quot;在崩溃面前稳得多的原因。</li><li><strong>显式 flush</strong>：<code>flush()</code>（recorder.rs:825）确保&quot;之前的写都落到盘上&quot;。在 resume / 关键节点前 flush，断电也不丢已确认的回合。</li><li><strong>失败可重试</strong>：打开/写文件失败不是致命——记下来，&quot;a later <code>persist()</code> or <code>flush()</code> can retry&quot;（recorder.rs:803）。磁盘暂时满了、文件被占用，下次再写，而不是丢掉这一整段会话。</li></ul>
+<blockquote>一句话：留底系统的生产级，不在&quot;记了什么&quot;，而在&quot;<strong>断电/崩溃时它还剩多少</strong>&quot;。append-only + flush + 可重试，就是为了让答案是&quot;几乎全在&quot;。压缩（<a href="../s07_context_compaction/index.html">s07</a>）省的是窗口，rollout 保的是这份经得起断电的底稿。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>持久化对象</td><td>session history（会话记录，主要供本地续聊）</td><td><strong>完整 rollout</strong>：每个 item、工具调用、错误、token 计数都落盘</td></tr><tr><td>能力</td><td>恢复会话</td><td>resume（续跑）+ <strong>rewind（回退 N 个回合）</strong> + <strong>审计</strong></td></tr><tr><td>谁来消费</td><td>本地交互</td><td>同一份 rollout 同时驱动<strong>本地 TUI / <code>codex exec</code>（无头）/ Codex Web（云端）</strong></td></tr><tr><td>与压缩的关系</td><td>——</td><td>压缩修剪上下文，rollout 仍保留全量原始历史，两者<strong>正交</strong></td></tr></tbody></table>
+<p><strong>为什么？</strong> 因为 Codex 把宝押在「<strong>低人工干预的自主运行</strong>」上——<code>codex exec</code> 在 CI 里、agent 在云端，<strong>没有人盯着终端</strong>。这种场景对持久化的要求和「本地交互式续聊」是两个量级：</p>
+<ul><li><strong>云 + 无头需要「持久」</strong>：进程随时可能被调度走、被重启，对话必须在磁盘上有一份权威副本，换台机器也能 <code>resume</code> 接上。</li><li><strong>自主运行需要「可审计」</strong>：没人实时把关，事后追责就靠这份逐条记录——它当时到底跑了什么、模型怎么决策的，一行不少。</li><li><strong>多前端需要「单一事实源」</strong>：你在网页上开的会话，回到终端 <code>codex exec --resume</code> 还能接着干，因为大家读的是同一份 rollout。</li></ul>
+<p>这正是全课主线在持久化上的投影：Claude Code 围绕<strong>交互式 UX</strong>存「够续聊的历史」；Codex 为<strong>headless / CI / 云</strong>存「可 resume、可 rewind、可审计的完整底稿」。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<p>教学版的 <code>RolloutRecorder</code> 大约 40 行、一个 JSONL 文件。真 Codex 的 rollout 子系统是 <code>codex-rs/rollout/</code>（recorder 单文件就 1600+ 行），外加一整个 <code>codex-rs/state/</code> SQLite 运行时。下面四块讲清差距。</p>
+<details>
+<summary>一、存储：教学版 JSONL，真版是 JSONL 会话文件 + SQLite state.db + zstd</summary>
+<p>教学版图省事用一个 <code>rollout.jsonl</code>。真 Codex 是<strong>两层存储并存</strong>：</p>
+<table><thead><tr><th>维度</th><th>教学版</th><th>真 codex-rs</th></tr></thead><tbody><tr><td>会话文件</td><td><code>_demo_workspace/rollout.jsonl</code></td><td><code>~/.codex/sessions/YYYY/MM/DD/rollout-&lt;时间&gt;-&lt;id&gt;.jsonl</code></td></tr><tr><td>文件名</td><td>固定</td><td><code>rollout-2025-05-07T17-24-21-&lt;uuid&gt;.jsonl</code>（冒号换成 <code>-</code>，兼容文件系统）</td></tr><tr><td>索引 / 列表</td><td>无</td><td><strong>SQLite <code>state.db</code></strong>（<code>codex-rs/state/</code>，<code>StateRuntime</code>）做线程列表、搜索、分页</td></tr><tr><td>冷数据</td><td>永不压缩</td><td>后台 worker 把冷文件压成 <strong><code>.jsonl.zst</code></strong>（<code>compression.rs</code>，依赖 <code>zstd</code>）</td></tr><tr><td>续写压缩文件</td><td>——</td><td>先 <code>materialize_rollout_for_append</code> 把 <code>.zst</code> 解回 <code>.jsonl</code> 再 append</td></tr></tbody></table>
+<p>为什么真版要 SQLite？因为 <code>codex resume</code> 要在成千上万个历史会话里<strong>按时间排序、分页、全文搜索</strong>——遍历一堆 JSONL 文件做不到这些，而 SQLite 的索引天生擅长。JSONL 仍是<strong>权威的逐行记录</strong>（人能 <code>jq</code> 直接看），SQLite 是<strong>它上面的可查询索引层</strong>。文件名里塞时间戳和 UUID，则是为了不开数据库也能从文件名排序、定位会话。</p>
+<pre><code class="language-rust">// recorder.rs：每行就是 {timestamp} + 一个 flatten 进来的 RolloutItem
+let line = RolloutLineRef { timestamp, item: rollout_item };
+let mut json = serde_json::to_string(item)?;
+json.push(&#x27;\n&#x27;);
+self.file.write_all(json.as_bytes()).await?;
+self.file.flush().await?;          // ← 教学版照搬了这个「写完即 flush」</code></pre>
+</details>
+<details>
+<summary>二、RolloutItem 到底记什么：五个变体 + 一套持久化策略</summary>
+<p>教学版只记两类（<code>session_meta</code> / <code>response_item</code>）。真 <code>RolloutItem</code> 是个枚举，有五个变体（<code>protocol.rs:2827</code>）：</p>
+<pre><code class="language-rust">pub enum RolloutItem {
+    SessionMeta(SessionMetaLine),   // 会话头：id / cwd / git / 版本 / 模型 provider…
+    ResponseItem(ResponseItem),     // 对话本体：message / function_call / output / reasoning…
+    Compacted(CompactedItem),       // ★ 压缩标记：被换掉的历史 + 替代摘要（与 s07 直接相关）
+    TurnContext(TurnContextItem),   // 回合上下文快照（当时的 cwd / 审批策略 / 模型…）
+    EventMsg(EventMsg),             // 少数关键事件（token 计数、patch 应用结果、回退…）
+}</code></pre>
+<p>而且真版<strong>不是什么都记</strong>——<code>policy.rs</code> 有一套 <code>is_persisted_rollout_item</code> / <code>should_persist_response_item</code>：会进历史的 <code>Message / FunctionCall / FunctionCallOutput / Reasoning</code> 等<strong>记</strong>；纯增量的 <code>*Delta</code>、<code>ExecApprovalRequest</code>、<code>McpStartupUpdate</code> 这类<strong>瞬态/UI 事件不记</strong>。所以 rollout 里既有「模型说了什么、跑了什么」，也有「花了多少 token、patch 应用成没成」，但不会被每个生命周期事件灌爆。</p>
+<p>教学版把这套策略简化成「全记」，因为我们的 item 种类本来就少。</p>
+</details>
+<details>
+<summary>三、resume 与 rewind：续跑，以及回退 N 个回合</summary>
+<p>教学版 <code>resume()</code> = 读全文件 → 还原 <code>messages</code>。真版 <code>get_rollout_history</code>（<code>recorder.rs:912</code>）多做几件事：解析出 <code>conversation_id</code>、把结果包成 <code>InitialHistory::Resumed { conversation_id, history, rollout_path }</code>（空文件则返回 <code>InitialHistory::New</code>）、并能从 <code>.jsonl.zst</code> 透明读回。</p>
+<p><strong>rewind（回退）</strong>则是 resume 之外的另一种「时间操作」，由一个独立的 <code>Op</code> 触发（<code>protocol.rs:583</code>）：</p>
+<pre><code class="language-rust">/// 把内存上下文里最后 N 个用户回合丢掉。
+/// 注意：它不负责回滚磁盘上的文件改动——那由客户端自己撤销。
+ThreadRollback { num_turns: u32 },</code></pre>
+<p>也就是说：<strong>resume 是「把底稿读回来从尾部继续」，rewind 是「把尾部砍掉 N 段重来」</strong>。两者都建立在「有一份按回合切分的完整记录」之上——没有 rollout，这两件事都无从谈起。失败时还有专门的 <code>ThreadRollbackFailed</code> 错误码。</p>
+</details>
+<details>
+<summary>四、与压缩（s07）的分工：一个修剪上下文，一个保全底稿</summary>
+<p>这是最容易混淆、也最能体现设计意图的一点。<a href="../s07_context_compaction/index.html">s07</a> 的压缩<strong>会主动丢历史</strong>：把一长段旧对话替换成一句摘要，好让喂给模型的 token 变少。如果 rollout 跟着上下文一起被压，那「完整记录」就成了空话。</p>
+<p>真 Codex 的解法是让两者<strong>正交</strong>：压缩这件事本身也被当成一个 <code>RolloutItem::Compacted</code> <strong>记进 rollout</strong>——它保存了「被换掉的原始历史 <code>replacement_history</code> + 替代摘要 <code>message</code>」（<code>protocol.rs:2836</code>）。于是：</p>
+<table><thead><tr><th></th><th>喂给模型的上下文</th><th>rollout 底稿</th></tr></thead><tbody><tr><td>压缩发生时</td><td>旧对话 → 被摘要替换，变短</td><td>追加一条 <code>Compacted</code>，<strong>原始历史仍在文件里</strong></td></tr><tr><td>resume 时</td><td>用压缩后的上下文继续（省 token）</td><td>仍可读到压缩前的全量记录（可审计）</td></tr></tbody></table>
+<p>一句话：<strong>压缩优化的是「当下要花的钱」，rollout 守护的是「事后能追的账」。</strong> 二者不打架，正因为压缩动作本身也被忠实地记进了底稿。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s08_rollout/code.py --demo   # 录制 → 落盘 jsonl → resume 回放（mock，无需 key，自动清理）
+python s08_rollout/code.py          # 交互模式：你的每句话、每次工具调用都被记进 rollout</code></pre>
+<p>默认 <code>backend=mock</code>，离线可跑。<code>--demo</code> 会在 <code>_demo_workspace/</code> 下临时写一个 <code>rollout.jsonl</code>，跑完自动 <code>rmtree</code> 清理。</p>
+<h2 id="小结">小结</h2>
+<ul><li>回合每产出一个 item 就<strong>追加一行</strong>落盘（append-only + 写完即 flush）；<code>resume</code> 逐行回放成 <code>messages</code>，会话从断点继续。</li><li>真 Codex 用 <strong>SQLite（state.db）做索引 + JSONL 会话文件 + 冷文件 zstd 压缩</strong>；<code>RolloutItem</code> 有 5 个变体，且有一套「记什么/不记什么」的持久化策略。</li><li>rollout 是 <strong>resume / rewind（<code>ThreadRollback</code>）/ 审计</strong>的共同地基，也是 Codex Web 和 <code>codex exec</code> 共享的单一事实源。</li><li>它和压缩（<a href="../s07_context_compaction/index.html">s07</a>）<strong>正交</strong>：压缩省的是 token，rollout 保的是全量底稿（连压缩动作本身都记进去）。</li><li><strong>生产级</strong>：留底要经得起断电——append-only（崩溃最多丢最后一行）、关键点 <code>flush()</code> 落盘、写失败可重试不丢会话（见「生产级」一节）。</li><li>下一站 <a href="../s09_responses_api/index.html">s09 Responses API</a>：本章一直在记录、回放 <code>message</code> / <code>function_call</code> / <code>function_call_output</code> 这套 item——下一章就掀开引擎盖，看这套形状到底从哪来、模型究竟是怎么被调用的。</li></ul>
+<h2 id="思考">思考</h2>
+<ol><li>教学版 <code>resume</code> 把整个文件读进内存再回放。如果一个会话跑了三天、rollout 有几十万行（还压成了 <code>.zst</code>），这种「全量读回」会出什么问题？真版为什么要在 JSONL 之上再压一层 SQLite 索引——纯靠文件名能扛住「按时间分页 + 全文搜索」吗？</li></ol>
+<ol><li><code>ThreadRollback</code> 的注释明说：它只丢内存上下文里的回合，<strong>不回滚磁盘上已经发生的文件改动</strong>。那么「rewind 到第 5 个回合」之后，工作区其实还停在第 7 个回合的状态——这种「对话回退了、文件没回退」的错位，会不会让模型更糊涂？换成你，会让 rewind 一并撤销文件改动吗，代价是什么？</li></ol>
+<ol><li>rollout 把模型说的每句话、跑的每条命令、甚至 token 花费都<strong>永久留底</strong>。这对「云端 / 无人值守」是审计刚需，但同一份底稿也意味着敏感信息（密钥、客户数据）被原样写进磁盘。Codex 选择「全记 + 内核沙箱兜底」，Claude Code 选择「轻量历史 + 交互式审批」——如果是你来定策略，哪些 item 值得永久留底，哪些该脱敏或干脆不记？</li></ol>
+<ol><li>压缩（s07）为省 token 丢历史，rollout 却坚持留全量——本章说它俩「正交」，靠的是把压缩动作本身也记成一个 <code>Compacted</code> item。可如果连「被换掉的原始历史」也一并存进 rollout，那压缩省下的磁盘到底省在哪？这种「上下文省、底稿不省」的取舍，在什么场景下会反过来咬你一口？</li></ol>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

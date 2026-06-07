@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s17: Comprehensive — 拼装一个迷你 Codex</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s17-comprehensive-拼装一个迷你-codex">s17: Comprehensive — 拼装一个迷你 Codex</h1>
+<blockquote><em>&quot;造好载具，agent 会完成剩下的。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s16_config/index.html">s16 config</a> → <strong>s17 综合（单 agent 篇 · 终点）</strong> → <a href="../s18_multiagent/index.html">s18 多智能体（进阶）</a></p>
+<hr>
+<h2 id="先把思想说透整门课其实只是一条流水线">先把思想说透：整门课其实只是「一条流水线」</h2>
+<p>走到最后一章，回头看：前面 16 章好像各讲各的——循环、apply_patch、沙箱、审批、AGENTS.md、事件广播……像 16 个互不相干的话题。但其实它们从头到尾都在拼<strong>同一样东西</strong>。想通下面三个道理，你不只看懂这一章，还会突然看懂整门课的结构。</p>
+<p><strong>道理一：一条用户请求要变成真实行动，必须依次穿过好几道关卡——这条链子就是 agent 的本质形状。</strong> 你说一句「执行 <code>echo hi</code>」，它不会、也不该直接就跑。它得<strong>依次穿过</strong>：注入项目记忆（让模型带着这个项目的规矩思考）→ 调模型拿到「想做什么」→ 过审批闸门（这条命令准不准跑）→ 落进沙箱安全地执行 → 结果回灌、继续循环。把这些处理一道接一道排起来，就是一条<strong>流水线</strong>——像工厂传送带，原料（你的话）在带上走，每过一个工位被加工一次，最后出成品（一次被批准、被沙箱、被记录的行动）。前面每一章打磨的那个机制，其实都是这条传送带上的<strong>一道关卡</strong>（gate：先检查、再放行，最典型的就是审批闸门，像机场安检口，命令得先过安检、再过沙箱隔离门，才被允许真正执行）。</p>
+<p><strong>道理二（最关键）：模型只在这条流水线的中间一步出现，其余每一道关卡都是 harness。</strong> 这是整门课最想让你看见的事实。盯着那条传送带数一数：模型只在「想做什么」那一步露了个面，吐出一个工具调用就退场了。它<strong>不决定</strong>这条命令准不准跑（审批）、<strong>不负责</strong>安全地执行（沙箱）、<strong>不操心</strong>怎么被记录和广播（事件）、<strong>也不管</strong>项目的规矩从哪来（记忆注入）。这些全是<strong>harness</strong> 的活。所以那句贯穿全课的话——「Agency 来自模型，载具由你来造」——在这一章变得肉眼可见：<strong>模型提供「想做什么」的智能，你作为 harness 工程师，造好它栖居与行动的整个世界。</strong></p>
+<p><strong>道理三：把小零件按正确接口接起来，就长出一个能跑的迷你 Codex——复杂度在工程化，骨架可以很小。</strong> 前 16 章每章造了一个<strong>零件</strong>（component），单看都是一小段能跑的代码，像乐高里的单块。这一章不造新零件，而是把它们按正确顺序、正确接口<strong>装配</strong>起来——让数据从一个零件的出口流进下一个的入口，再跑一次<strong>集成验证</strong>（<code>--demo</code> 让一条请求真的从头走到尾，确认这些零件合在一起真能协同，而不只是各自单独能跑）。神奇的是：这样拼出来的东西，骨架和真 Codex 那个工业级的「总装车间」<code>turn.rs</code> <strong>是同一具</strong>——区别只在真版把每个零件做到了上千行的健壮，而核心思想，五十行就装得下。</p>
+<p>一句话定调：<strong>整门课就是在造一条流水线——前 16 章在造零件，这一章把零件装起来、验证它们协同工作。</strong> 看懂「请求如何沿流水线穿过一道道关卡、而模型只占其中一步」，你就握住了任何 agent harness 的骨架。</p>
+<h2 id="问题">问题</h2>
+<p>前面 16 章，每章打磨一个零件：循环、apply_patch、沙箱、审批、SQ/EQ、Responses、AGENTS.md…… 可一个真正的 agent 产品不是零件的堆叠，而是它们的<strong>装配体</strong>。</p>
+<p>零件之间怎么咬合？一条用户请求，要依次穿过多少道关卡，才变成一次&quot;被批准、被沙箱、被记录&quot;的真实行动？这一章把零件装起来，跑通一条完整流水线。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>一条贯穿始终的请求流水线——这正是 Codex（和任何 agent harness）的本质形状：</p>
+<pre><code>  用户输入
+     │
+     ▼  注入项目记忆 (s06 AGENTS.md)
+  build_system()
+     │
+     ▼  调模型，拿工具调用 (s09 Responses 形状 / s01 循环)
+  model.respond()
+     │
+     ▼  每个工具调用，先过闸门
+  审批 decide() ──拒绝──▶ 不执行，回灌 &quot;(denied)&quot;
+     │ 放行
+     ▼  命令落进内核沙箱 (s05) / 文件改动走 apply_patch (s03)
+  run_sandboxed() / apply_patch()
+     │
+     ▼  全程广播事件 (s10)
+  emit(...) ──▶ 前端渲染
+     │
+     ▼  结果回灌，继续循环 (s01)</code></pre>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>——它不引入任何新机制，只是把前面的精简搬运过来、接成一条线：</p>
+<ul><li><code>build_system()</code> 把向上发现的 AGENTS.md 拼进 system（s06）；</li><li>工具不再直接执行：<code>tool_shell</code> 先过 <code>decide()</code> 审批闸门（s04），放行后交给 <code>run_sandboxed()</code>（s05）；<code>tool_apply_patch</code> 走补丁应用（s03）；</li><li><code>emit()</code> 在每一步广播事件（s10）；</li><li><code>run_turn()</code> 是那个熟悉的 s01 循环，只是中间多了上面这些关卡。</li></ul>
+<p>关键就一行心法：<strong>工具 = 审批闸门 → (沙箱 / apply_patch)</strong>。模型负责&quot;想做什么&quot;，harness 负责&quot;能不能做、怎么安全地做&quot;。</p>
+<p>真 Codex 的&quot;总装车间&quot;在 <a href="../../codex/codex-rs/core/src/session/turn.rs"><code>core/src/session/turn.rs</code></a>——它把同样这些关卡，工业级地编排在异步回合里。</p>
+<p><strong>走一遍</strong>：跟着 <code>--demo</code> 的第 ① 步——用户说「执行 <code>echo mini-codex online</code>」——看一条请求怎么沿流水线一道道关卡穿过去，每步的数据长什么样、为什么要有这一步。</p>
+<p>第 1 步 <strong>build_system()</strong>（注入项目记忆）。<code>run_turn</code> 一开始就把当前目录向上发现的 AGENTS.md 拼进 system 提示。如果上层有一份 AGENTS.md，system 大致长这样（<strong>为什么</strong>：让模型带着「这个项目的规矩」去思考，而不是每次从零开始）：</p>
+<pre><code class="language-text">You are a mini-Codex coding agent at /path/to/repo. Act, don&#x27;t explain.
+
+&lt;project_instructions&gt;
+--- /path/to/repo/AGENTS.md ---
+（这里是项目自己的约定，比如&quot;用 ruff 格式化&quot;&quot;测试放 tests/&quot;）
+&lt;/project_instructions&gt;</code></pre>
+<p>第 2 步 <strong>model.respond(...)</strong>（调模型，拿工具调用）。把 <code>[user_item(&quot;执行 …&quot;)]</code> 连同工具清单和 system 发给模型，模型不直接执行，而是<strong>回一个工具调用</strong>（s09 Responses 的形状）——大意是「我想调 shell，参数是这条命令」：</p>
+<pre><code class="language-json">{&quot;type&quot;: &quot;function_call&quot;, &quot;name&quot;: &quot;shell&quot;,
+ &quot;call_id&quot;: &quot;call_1&quot;, &quot;arguments&quot;: {&quot;command&quot;: &quot;echo mini-codex online&quot;}}</code></pre>
+<p><strong>为什么</strong>：模型只负责「想做什么」，决定权先不交给它——这正是下一关存在的理由。</p>
+<p>第 3 步 <strong>decide() 审批闸门</strong>（先检查再放行）。<code>tool_shell</code> 拿到命令后<strong>不立刻跑</strong>，先喊一声 <code>emit(&quot;approval&quot;, ...)</code> 广播「有个待批的命令」，再交给 <code>decide(command, policy)</code> 判一下。当前 <code>POLICY = &quot;on-request&quot;</code>，而 <code>echo</code> 在安全名单 <code>SAFE</code> 里、又不含危险片段，于是裁决是 <code>approve</code>（<strong>为什么</strong>：安全的只读类命令自动放行，省去打扰；真要 <code>rm -rf</code> 这种才会停下来问）：</p>
+<pre><code class="language-text">[event] ❓ approval   shell: echo mini-codex online
+decide(&quot;echo mini-codex online&quot;, &quot;on-request&quot;) → &quot;approve&quot;     # 命中 SAFE，放行</code></pre>
+<p>第 4 步 <strong>run_sandboxed()</strong>（命令落进内核沙箱执行）。放行后，命令并不是裸奔 <code>os.system</code>，而是被包进 macOS Seatbelt 策略里执行——只允许在工作目录下写文件，别处只读（<strong>为什么</strong>：万一模型给的命令有破坏性，沙箱是内核级的最后一道物理隔离）。执行前先 <code>emit(&quot;exec&quot;, ...)</code>：</p>
+<pre><code class="language-text">[event] ⏵ exec      echo mini-codex online
+（在 sandbox-exec 包裹下运行 /bin/sh -c &quot;echo mini-codex online&quot;）
+→ 输出: &quot;mini-codex online&quot;</code></pre>
+<p>第 5 步 <strong>结果回灌，继续循环</strong>（s01）。命令输出被包成一个 <code>tool_output_item</code> 追加回消息列表，循环回到第 2 步再问模型「拿到结果了，下一步?」。这次模型没有新的工具调用、只回了一句话，于是 <code>emit(&quot;msg&quot;, ...)</code> 然后结束这一回合：</p>
+<pre><code class="language-python">messages.append(tool_output_item(&quot;call_1&quot;, &quot;mini-codex online&quot;))
+# 再调一次 model.respond → 这次 resp.tool_calls 为空 → 收尾</code></pre>
+<p><strong>把这五步连起来看</strong>：用户的一句话，经过「注入记忆 → 模型出意图 → 审批放行 → 沙箱执行 → 结果回灌」五道关卡，才变成一次<strong>被批准、被沙箱、被记录</strong>的真实行动。模型只在第 2 步出现一下；其余每一关都是 harness 在干活。这就是这一章想让你亲眼看到的骨架。</p>
+<h2 id="生产级把能跑和能上生产分开看">生产级：把&quot;能跑&quot;和&quot;能上生产&quot;分开看</h2>
+<p>走到这里，你已经看过每一章的「生产级」小节。把它们摞起来看，会发现一条清晰的分界线：<strong>让 agent &quot;能跑&quot;的代码很少，让它&quot;能上生产&quot;的代码占了大半</strong>——而后者几乎全在回答同一个问题：&quot;出岔子时怎么办？&quot;</p>
+<table><thead><tr><th>关卡</th><th>&quot;能跑&quot;的玩具</th><th>&quot;能上生产&quot;补的那一层</th></tr></thead><tbody><tr><td>回合循环（<a href="../s01_agent_loop/index.html">s01</a>）</td><td><code>while True</code></td><td>步数封顶 + 可中断（<code>Op::Interrupt</code>）</td></tr><tr><td>工具（<a href="../s02_tool_use/index.html">s02</a>）</td><td><code>handler(**args)</code></td><td>schema 校验 + 出错回灌（<code>RespondToModel</code>/<code>Fatal</code>）</td></tr><tr><td>apply_patch（<a href="../s03_apply_patch/index.html">s03</a>）</td><td>精确匹配</td><td>模糊匹配 + 原子（两阶段）+ 错误回灌</td></tr><tr><td>审批（<a href="../s04_approval/index.html">s04</a>）</td><td>一个 bool</td><td>带记忆的 <code>ReviewDecision</code> + <code>BANNED_PREFIX</code> 刹车</td></tr><tr><td>沙箱（<a href="../s05_sandbox/index.html">s05</a>）</td><td>8 行策略</td><td>deny-default + 默认禁网 + 逐条选沙箱</td></tr><tr><td>压缩（<a href="../s07_context_compaction/index.html">s07</a>）</td><td>proactive 估算</td><td>reactive 撞墙兜底</td></tr><tr><td>模型调用（<a href="../s09_responses_api/index.html">s09</a>）</td><td>一次请求</td><td>重试 + 退避抖动 + 传输回退 + 错误分类</td></tr><tr><td>MCP（<a href="../s15_mcp/index.html">s15</a>）</td><td>进程内调用</td><td>超时 + 连接韧性 + 命名空间</td></tr><tr><td>配置（<a href="../s16_config/index.html">s16</a>）</td><td>读字段</td><td>边界校验（<code>deny_unknown_fields</code> + typed enum）</td></tr></tbody></table>
+<p>看出共同的母题了吗？<strong>几乎每一层的&quot;生产级&quot;都是同一句话的变体：假设它会出错，然后让出错时倒向安全、可恢复、不失控。</strong> fail-closed、回灌让模型自己改、封顶防失控、断电不丢底稿——这不是九个互不相干的技巧，而是同一种工程直觉在九个位置的九次现身。这就是&quot;造载具&quot;的真正含义：模型负责聪明，而你负责让这台载具<strong>在它犯错、网络抖动、用户喊停、磁盘写满时，依然不翻车</strong>。</p>
+<h2 id="-与-claude-code-的不同一张零件总对照">🆚 与 Claude Code 的不同：一张零件总对照</h2>
+<p>走到终点，把整趟旅程收成一张表——同一条流水线，两套零件选择：</p>
+<table><thead><tr><th>关卡</th><th>Claude Code</th><th>Codex</th><th>章节</th></tr></thead><tbody><tr><td>线协议</td><td>Anthropic Messages</td><td>OpenAI Responses（+reasoning）</td><td>s09</td></tr><tr><td>改文件</td><td>Edit 串替换</td><td>apply_patch 补丁信封</td><td>s03</td></tr><tr><td>安全·第一道</td><td>审批弹窗（应用层）</td><td>内核沙箱（内核层）</td><td>s05</td></tr><tr><td>审批</td><td>危险即问</td><td>4 档策略 + Guardian</td><td>s04 / s14</td></tr><tr><td>架构</td><td>较直接的循环</td><td>SQ/EQ 双队列 + 多前端</td><td>s10 / s11</td></tr><tr><td>项目记忆</td><td>CLAUDE.md</td><td>AGENTS.md（逐级向上）</td><td>s06</td></tr><tr><td>会话</td><td>历史</td><td>Rollout（可续接/回放）</td><td>s08</td></tr></tbody></table>
+<p><strong>为什么？</strong> 一句话收束全篇：<strong>Claude Code 押&quot;协作&quot;（交互式审批 UX、应用层把关），Codex 押&quot;自主&quot;（内核沙箱、可审计 rollout、为无人值守而生）；而两边的工具差异，归根结底是各自模型被训练出的习惯不同。</strong> 没有谁对谁错，只有面向不同场景的不同下注。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<details>
+<summary>一、这条 demo 流水线省掉了什么</summary>
+<p>迷你 Codex 只串了 6 个零件。一个真实回合还会穿过：rollout 记录（s08）、上下文压缩（s07）、MCP 工具（s15）、hooks（s13）、Guardian 风险评估（s14）、并把事件喂给 TUI / <code>codex exec</code>（s11 前端）。每一个都是这条流水线上的又一道关卡。</p>
+</details>
+<details>
+<summary>二、完整版流水线：16 个零件各自挂在哪一道关卡（全课索引）</summary>
+<p>把全课 16 个零件按它们在「一条真实请求」上出现的先后，挂回这条流水线——这张表既是收尾，也是一份回看导航：哪一章造的零件，落在传送带的哪个工位。</p>
+<table><thead><tr><th>流水线工位（按请求先后）</th><th>干什么</th><th>教学版 demo 有?</th><th>章节</th></tr></thead><tbody><tr><td>回合循环（最外层）</td><td><code>while</code>：调模型→执行工具→回灌→再调，直到没有工具调用</td><td>✅ <code>run_turn</code></td><td><a href="../s01_agent_loop/index.html">s01</a></td></tr><tr><td>工具与分发</td><td>声明工具 schema、把模型的 tool_call 路由到对应处理函数</td><td>✅ <code>TOOLS</code>/<code>HANDLERS</code></td><td><a href="../s02_tool_use/index.html">s02</a></td></tr><tr><td>注入项目记忆</td><td>向上逐级收集 AGENTS.md 拼进 system</td><td>✅ <code>build_system</code></td><td><a href="../s06_agents_md/index.html">s06</a></td></tr><tr><td>上下文压缩</td><td>历史过长时摘要旧轮，腾出窗口</td><td>❌ 省略</td><td><a href="../s07_context_compaction/index.html">s07</a></td></tr><tr><td>续接 / 回放</td><td>把每轮写进 rollout，崩溃后可续、可回放</td><td>❌ 省略</td><td><a href="../s08_rollout/index.html">s08</a></td></tr><tr><td>调模型（线协议）</td><td>用 OpenAI Responses 形状发请求、收 reasoning + tool_call</td><td>✅ <code>model.respond</code>（mock）</td><td><a href="../s09_responses_api/index.html">s09</a></td></tr><tr><td>事件双队列（SQ/EQ）</td><td>提交侧 <code>Op</code> 入、事件侧 <code>Event</code> 出；解耦前端与 core</td><td>✅ <code>emit</code>（精简）</td><td><a href="../s10_sq_eq_protocol/index.html">s10</a></td></tr><tr><td>前端渲染</td><td>事件喂给 TUI 或 <code>codex exec</code> 无头模式</td><td>❌ 省略</td><td><a href="../s11_frontends/index.html">s11</a></td></tr><tr><td>更多工具</td><td>plan / web_search / view_image 等扩展工具</td><td>❌ 省略</td><td><a href="../s12_tools_extra/index.html">s12</a></td></tr><tr><td>Hooks</td><td>在关键时机插入用户自定义脚本</td><td>❌ 省略</td><td><a href="../s13_hooks/index.html">s13</a></td></tr><tr><td>审批闸门</td><td>工具执行前裁决 approve / ask；Guardian 评风险</td><td>✅ <code>decide</code>（4 档）</td><td><a href="../s04_approval/index.html">s04</a> / <a href="../s14_guardian/index.html">s14</a></td></tr><tr><td>内核沙箱</td><td>放行后命令落进 Seatbelt，只能写工作区</td><td>✅ <code>run_sandboxed</code></td><td><a href="../s05_sandbox/index.html">s05</a></td></tr><tr><td>改文件</td><td>文件改动走 apply_patch 补丁信封而非裸写</td><td>✅ <code>apply_patch</code></td><td><a href="../s03_apply_patch/index.html">s03</a></td></tr><tr><td>MCP</td><td>接外部工具服务器（客户端 + 服务端）</td><td>❌ 省略</td><td><a href="../s15_mcp/index.html">s15</a></td></tr><tr><td>配置与 profile</td><td>分层解析 config.toml + 命名 profile 决定上面每档的默认值</td><td>❌ 省略</td><td><a href="../s16_config/index.html">s16</a></td></tr></tbody></table>
+<p>读法：<strong>带 ✅ 的 6 行就是本章 demo 真正串起来的那条最小流水线</strong>；带 ❌ 的是真 Codex 在同一条线上额外挂的关卡——它们不改变骨架，只是让每一道工位更结实。注意最后一行「配置」并不站在某个具体工位上，而是<strong>横贯整条线</strong>——它决定了审批用哪档、沙箱开多大、用哪个模型（见上一章 <a href="../s16_config/index.html">s16</a>）。</p>
+</details>
+<details>
+<summary>三、它仍然是个玩具</summary>
+<p>教学版的 apply_patch 只认精确上下文、审批是几个字符串前缀、沙箱策略 8 行、模型调用是 mock。真 Codex 的对应物分别是上千行的 crate、状态机、123 行起步的内核策略、流式 WebSocket 客户端。<strong>但骨架是同一具</strong>——这正是本课程想证明的：复杂度在保护与工程化，核心思想可以很小。</p>
+</details>
+<details>
+<summary>四、harness 工程师的工作</summary>
+<p>回看这条流水线：模型只出现在中间一步（&quot;想做什么&quot;）。其余每一道关卡——记忆、审批、沙箱、事件、记录——都是 harness。Agency 来自模型；而你，作为 harness 工程师，负责造好它栖居与行动的整个世界。</p>
+</details>
+<details>
+<summary>五、真源码 crate ↔ 章节（反查表）</summary>
+<p>想从 <code>codex-rs</code> 的某个 crate / 模块反查「它在本课哪一章拆」，用这张表：</p>
+<table><thead><tr><th>codex-rs crate / 模块</th><th>负责什么</th><th>在本课哪章</th></tr></thead><tbody><tr><td><code>core/src/session/turn.rs</code></td><td>回合引擎（编排一个 turn）</td><td><a href="../s01_agent_loop/index.html">s01</a> · <a href="../s17_comprehensive/index.html">s17</a></td></tr><tr><td><code>core/src/tools/</code>（registry / handlers）· <code>tools/src/tool_spec.rs</code></td><td>工具注册与分发</td><td><a href="../s02_tool_use/index.html">s02</a> · <a href="../s12_tools_extra/index.html">s12</a></td></tr><tr><td><code>apply-patch/</code>（parser · lib · seek_sequence）</td><td>补丁信封的解析与应用</td><td><a href="../s03_apply_patch/index.html">s03</a></td></tr><tr><td><code>execpolicy/</code> · <code>shell-command/src/command_safety/</code></td><td>审批决策 / 命令安全判定</td><td><a href="../s04_approval/index.html">s04</a></td></tr><tr><td><code>protocol/src/approvals.rs</code></td><td>审批事件 + Guardian 风险枚举</td><td><a href="../s04_approval/index.html">s04</a> · <a href="../s14_guardian/index.html">s14</a></td></tr><tr><td><code>sandboxing/</code>（Seatbelt）· <code>linux-sandbox/</code>（Landlock+seccomp）</td><td>内核级沙箱</td><td><a href="../s05_sandbox/index.html">s05</a></td></tr><tr><td><code>core/src/agents_md.rs</code></td><td>AGENTS.md 分层注入</td><td><a href="../s06_agents_md/index.html">s06</a></td></tr><tr><td><code>core/src/compact.rs</code> · <code>compact_remote.rs</code> / <code>_v2</code></td><td>上下文压缩（本地 + 服务端）</td><td><a href="../s07_context_compaction/index.html">s07</a></td></tr><tr><td><code>rollout/</code>（recorder）· <code>state/</code></td><td>会话持久化（resume / rewind / 审计）</td><td><a href="../s08_rollout/index.html">s08</a></td></tr><tr><td><code>core/src/client.rs</code></td><td>Responses API 模型客户端</td><td><a href="../s09_responses_api/index.html">s09</a></td></tr><tr><td><code>protocol/src/protocol.rs</code></td><td>SQ/EQ 协议：<code>Op</code> 进 / <code>EventMsg</code> 出</td><td><a href="../s10_sq_eq_protocol/index.html">s10</a></td></tr><tr><td><code>tui/</code> · <code>exec/</code> · <code>app-server/</code></td><td>三种前端（都只是事件消费者）</td><td><a href="../s11_frontends/index.html">s11</a></td></tr><tr><td><code>core/src/web_search.rs</code> · <code>protocol/src/plan_tool.rs</code></td><td>更多工具：plan / web_search / view_image</td><td><a href="../s12_tools_extra/index.html">s12</a></td></tr><tr><td><code>hooks/src/registry.rs</code></td><td>钩子注册与触发</td><td><a href="../s13_hooks/index.html">s13</a></td></tr><tr><td><code>codex-mcp/</code>（MCP 客户端）· <code>mcp-server/</code> · <code>core/src/mcp_tool_exposure.rs</code></td><td>MCP 双向：连别人 / 被别人连</td><td><a href="../s15_mcp/index.html">s15</a></td></tr><tr><td><code>config/</code>（merge.rs）</td><td>配置与 profiles（横贯整条流水线）</td><td><a href="../s16_config/index.html">s16</a></td></tr><tr><td><code>agent-graph-store/</code> · <code>agent-identity/</code> · <code>protocol</code>(InterAgentCommunication)</td><td>多智能体：图谱 / 身份 / 带内通信</td><td><a href="../s18_multiagent/index.html">s18</a></td></tr></tbody></table>
+<blockquote>注：路径以本仓库 <code>../../codex/codex-rs/</code> 为根；同一 crate 可能在多章出现（如 <code>protocol.rs</code> 被审批 / 协议 / 前端多处引用），这里只列它的<strong>主讲</strong>章。</blockquote>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s17_comprehensive/code.py --demo   # 离线跑通整条流水线
+python s17_comprehensive/code.py          # 交互模式（命令会被审批 + 沙箱）</code></pre>
+<h2 id="小结">小结</h2>
+<ul><li>你从 <a href="../s01_agent_loop/index.html">s01</a> 的一个 <code>while</code> 循环出发，途经 16 章、攒下一柜子零件，到这一章把它们拼成了一个会审批、会沙箱、带记忆、可观测的迷你 Codex。</li><li>agent 产品 = 模型 + harness；这一章证明了&quot;装配体&quot;如何由小零件咬合而成——<strong>流水线</strong>是骨架，每章的机制是挂在骨架上的一道道<strong>关卡</strong>。</li><li>真 Codex 只是把每个零件做到工业级（上千行 crate、状态机、内核策略、流式客户端）——但骨架是同一具，你已经握在手里了。</li><li><strong>生产级是一条贯穿全书的暗线</strong>：让 agent&quot;能跑&quot;的代码很少，让它&quot;能上生产&quot;的占大半——后者几乎都在回答&quot;出岔子时怎么办&quot;，答案都是同一句：假设它会错，让出错时<strong>倒向安全、可恢复、不失控</strong>（见「生产级」一节那张总表）。</li><li>进阶专题 <a href="../s18_multiagent/index.html">s18 多智能体</a>：当<strong>一个</strong> agent 不够用时，几个 agent 怎么互相说话？（正好接住下面思考第 4 问——这就是一个&quot;第 18 个零件&quot;的答案。）</li></ul>
+<h2 id="思考">思考</h2>
+<div class="think">
+<ol><li>这条流水线里，去掉哪一个零件，agent 仍能&quot;工作&quot;但变得<strong>危险</strong>？去掉哪一个会让它&quot;安全&quot;但<strong>残废</strong>？</li><li>如果要把这个迷你 Codex 搬到一个全新领域（比如运维、数据分析），哪些零件原样能用、哪些必须换？（提示：循环不变，工具/知识/权限在变。）</li><li>整趟看下来，Codex 和 Claude Code 的差异，有多少是&quot;工程取舍&quot;，有多少其实是&quot;两家模型不同&quot;逼出来的？</li><li>现在轮到你了：17 章之后，你会给这个 harness 加的<strong>第 18 个零件</strong>是什么？它解决模型的哪个短板？</li></ol>
+</div>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

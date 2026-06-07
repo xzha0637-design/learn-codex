@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s12: Tools Extra — 更多工具：plan / web_search / view_image，再加几个工具</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s12-tools-extra-更多工具plan-web_search-view_image再加几个工具">s12: Tools Extra — 更多工具：plan / web_search / view_image，再加几个工具</h1>
+<blockquote><em>&quot;给 agent 加能力，往往不是改循环，而是多注册一个 handler；而在 Codex 里，每个 handler 还要学会&#x27;报告自己在干什么&#x27;。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s11_frontends/index.html">前端：TUI + exec</a> → <strong>本章</strong> → <a href="../s13_hooks/index.html">Hooks</a></p>
+<hr>
+<h2 id="先把思想说透为什么给-agent-更多工具几乎不用动-agent">先把思想说透：为什么&quot;给 agent 更多工具&quot;几乎不用动 agent</h2>
+<p>到这里，你已经见过 Codex 最硬核的几块：回合循环（<a href="../s01_agent_loop/index.html">s01</a>）、apply_patch（<a href="../s03_apply_patch/index.html">s03</a>）、审批与沙箱（<a href="../s04_approval/index.html">s04</a> / <a href="../s05_sandbox/index.html">s05</a>）。现在我们换个轻松点、但同样重要的话题：<strong>怎么给这个 agent &quot;加技能&quot;</strong>。直觉上你可能以为&quot;加技能&quot;是件大工程，要去改它的大脑、改它的循环。恰恰相反——理解下面三个道理，你会发现加工具简单得有点反高潮，而 Codex 真正用心的地方，藏在第三点。</p>
+<p><strong>道理一：模型不需要你&quot;教&quot;它用工具，它只需要一张&quot;菜单&quot;。</strong> 回想 <a href="../s01_agent_loop/index.html">s01</a> 的顾问比喻：模型是个只会写纸条的聪明顾问。你给它一张菜单——&quot;你可以点这几样：跑命令、改文件、查网页、看图片&quot;——它就会在合适的时候写一张纸条说&quot;我要点&#x27;查网页&#x27;，参数是 codex&quot;。<strong>菜单</strong>就是工具的 schema（名字 + 描述 + 参数长什么样）。所以&quot;加一个工具&quot;的第一步，仅仅是往菜单上<strong>多印一行</strong>。模型读到了，自然就会在需要时点它。你不必写任何&quot;如果用户问 X 就调用 Y&quot;的 if-else——那是模型的活。</p>
+<p><strong>道理二：循环早就准备好了，它只按名字查表。</strong> <a href="../s02_tool_use/index.html">s02</a> 已经讲透了这点：回合循环里有一句 <code>HANDLERS.get(tc.name)</code>——模型说要点哪样菜，循环就按名字去一张 <code>{名字: 函数}</code> 的表里找对应的厨师，把它做出来。<strong>所以&quot;加一个工具&quot;的第二步，就是往这张表里多注册一行 <code>&quot;web_search&quot;: run_web_search</code>。</strong> 循环本身一个字都不用改。这一章我们一口气加三个工具（计划清单、网页搜索、看图片），你会亲眼看到：<code>run_turn</code> 和 <a href="../s01_agent_loop/index.html">s01</a> 那个<strong>一字不差</strong>。这就是&quot;加技能&quot;的全部秘密——它是声明式的，不是改造大脑。</p>
+<p><strong>道理三（这才是 Codex 的讲究）：工具不能&quot;闷头干活&quot;，它得一边干一边&quot;喊话&quot;。</strong> 前两点 Claude Code 也一样。Codex 真正多出来的一层是：<strong>每个工具动作都得是&quot;看得见&quot;的</strong>。为什么？想象 <code>web_search</code> 要跑三秒，<code>view_image</code> 要把一张大图读进来、编码。如果工具只是&quot;闷头算完、扔回一个字符串&quot;,那在这几秒里，盯着屏幕的人（或者 CI 的日志、IDE 的侧边栏）只会看到一个<strong>毫无反馈的卡顿界面</strong>——它在搜什么?卡住了吗?</p>
+<p>Codex 的答案是：让每个工具在开干时喊一声&quot;我开始搜了&quot;（一个 <strong>Begin</strong> 事件），干完再喊一声&quot;搜完了，搜的是 codex&quot;（一个 <strong>End</strong> 事件），中间夹着真正的活。这两声&quot;喊话&quot;流进 <a href="../s10_sq_eq_protocol/index.html">s10</a> 那条事件总线，于是 TUI、<code>codex exec</code>、IDE 后端——<strong>任意一个前端</strong>——都能实时画出&quot;🔍 搜索中…&quot;再更新成&quot;搜索完成&quot;。</p>
+<p>把这三点串起来，你就摸到了本章的主干：<strong>加工具 = 多印一行菜单 + 多注册一个 handler（道理一、二，与 Claude Code 共享）；而 Codex 还坚持让每个 handler 把自己的过程广播成事件（道理三，是它&quot;一个 core、多个前端&quot;架构的必然延伸）。</strong> 这也解释了一个看似奇怪的现象：Codex 的&quot;第一公民&quot;工具其实很少（主力就是跑命令 + 改文件），但它把&quot;任何工具动作都是可观测事件&quot;这件事做得极其统一——能力靠注册往上加，可观测性靠事件兜底。</p>
+<h2 id="问题">问题</h2>
+<p>让 agent 干一件真实的多步骤活——&quot;查一下这个 API 怎么用、看看用户给的报错截图、然后把修复写进代码&quot;。它会撞上两类不同的难处：</p>
+<p><strong>第一类：它需要的能力，循环里现在没有。</strong> 它没法上网查&quot;现在&quot;的事实（模型训练数据有截止日期），也没法&quot;看&quot;一张本地图片。这两样得作为新工具加进来。</p>
+<p><strong>第二类（更隐蔽）：就算工具加进来了，它们&quot;跑的过程&quot;对前端是隐形的。</strong> <code>web_search</code> 可能要跑几秒、甚至拆成多个子查询；<code>view_image</code> 要把图片读进来、编码、附到下一次请求。如果前端拿到的只有&quot;最终那个返回值&quot;,用户就盯着一个没有任何反馈的界面，不知道 agent 到底在搜什么、看哪张图、卡在哪。问题不在&quot;工具能不能跑&quot;,而在&quot;工具跑的<strong>过程</strong>对前端可见吗&quot;。</p>
+<p>本章用三个工具把这两类问题一起解决，并借它们讲清&quot;加能力&quot;与&quot;保持可观测&quot;这两件事如何协同。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>两步走，正好对应上面两类问题：</p>
+<p><strong>第一步：把三个工具注册进同一份 <code>HANDLERS</code>。</strong> 循环不改，模型读到菜单就会按需调用。</p>
+<p><strong>第二步：让每个工具把自己的过程建模成一对生命周期事件。</strong> 开始发 <code>Begin</code>、结束发 <code>End</code>，中间夹着真正的工作；用一个 <code>call_id</code> 把这一对串起来，前端就能在那一行原地把&quot;进行中&quot;更新成&quot;已完成&quot;。</p>
+<pre><code>   model 看到菜单（3 个工具的 schema），按需点单
+        │
+        ├─ update_plan({plan:[…]})  → ⟦event⟧ PlanUpdate{steps}        前端：画出带勾选框的待办列表
+        │
+        ├─ web_search(&quot;codex&quot;)
+        │       │
+        │       ⟦event⟧ WebSearchBegin{call_id}      ← 前端：显示&quot;🔍 搜索中…&quot;
+        │       （真正去搜 / 本教学版返回 canned 结果，绝不联网）
+        │       ⟦event⟧ WebSearchEnd{call_id, query, action}  ← 前端：原地更新成&quot;搜了 codex&quot;
+        │
+        └─ view_image(&quot;shot.png&quot;)
+                │
+                ⟦event⟧ ViewImageBegin{call_id, path}   ← 前端：显示&quot;🖼 查看中…&quot;
+                （读字节 / 嗅探类型；真身还会解码、resize、附进请求）
+                ⟦event⟧ ViewImageEnd{call_id, path}     ← 前端：显示看了哪张图
+
+   每个工具的返回值都照常作为 function_call_output 回灌 → 继续循环</code></pre>
+<p>这套&quot;一切动作皆事件&quot;正是 <a href="../s10_sq_eq_protocol/index.html">s10</a> 事件队列（EQ）的直接应用：core 只管按时序吐事件，三个前端各自决定怎么画。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>。<code>run_turn</code> 仍是 <a href="../s01_agent_loop/index.html">s01</a> 搬运、<strong>一字未改</strong>；新增的是三个 handler，以及它们内部发出的事件。</p>
+<p><strong>第 1 步</strong> — 一个模拟事件总线的 <code>emit</code>，外加给每次调用发个 <code>call_id</code>（Begin/End 配对的钥匙）：</p>
+<pre><code class="language-python">def emit(event, **fields):        # 模拟把事件放进 EQ；真身会被 TUI/IDE 消费
+    print(f&quot;⟦event⟧ {event} {fields}&quot;)</code></pre>
+<p><strong>第 2 步</strong> — <code>update_plan</code>：校验 → 整盘替换内存清单 → 发 <code>PlanUpdate</code> 事件并渲染 → 回固定一句话。关键在&quot;每次重发完整清单、整盘替换&quot;,于是计划&quot;活&quot;在对话上下文之外、不靠模型记忆：</p>
+<pre><code class="language-python">def run_update_plan(plan, explanation=None):
+    # 校验每项有 step + 合法 status；至多一个 in_progress
+    CURRENT_PLAN[:] = plan                 # 整盘替换
+    emit(&quot;PlanUpdate&quot;, explanation=explanation, steps=len(plan))
+    print(render_plan(plan, explanation))
+    return &quot;Plan updated&quot;                  # 回模型的就是这固定一句</code></pre>
+<p><strong>第 3 步</strong> — <code>web_search</code>：发 <code>Begin</code> → 取结果（<strong>离线 canned，绝不联网</strong>）→ 发 <code>End</code>：</p>
+<pre><code class="language-python">def run_web_search(query):
+    call_id = next_call_id()
+    emit(&quot;WebSearchBegin&quot;, call_id=call_id)
+    hits = _CANNED.get(...)                # 内置假结果，不联网
+    emit(&quot;WebSearchEnd&quot;, call_id=call_id, query=query, action=&quot;search&quot;)
+    return &quot;\n&quot;.join(...)</code></pre>
+<p><strong>第 4 步</strong> — <code>view_image</code>：发 <code>Begin</code> → 读字节、用魔数嗅探类型 → 发 <code>End</code>，只回<strong>元数据</strong>（不做真视觉）：</p>
+<pre><code class="language-python">def run_view_image(path):
+    call_id = next_call_id()
+    emit(&quot;ViewImageBegin&quot;, call_id=call_id, path=str(p))
+    data = p.read_bytes()
+    mime = _sniff_type(data[:16])          # PNG/JPEG/GIF… 魔数
+    emit(&quot;ViewImageEnd&quot;, call_id=call_id, path=str(p))
+    return f&quot;viewed image: ... type={mime} size={len(data)} bytes (metadata only)&quot;</code></pre>
+<p>这三块对应真 Codex 的三处源码：参数结构来自 <a href="../../codex/codex-rs/protocol/src/plan_tool.rs"><code>protocol/src/plan_tool.rs</code></a>（<code>StepStatus</code> / <code>UpdatePlanArgs</code>），plan 的 handler 在 <a href="../../codex/codex-rs/core/src/tools/handlers/plan.rs"><code>core/src/tools/handlers/plan.rs</code></a>（<code>PlanHandler</code>），web_search 的格式化与事件在 <a href="../../codex/codex-rs/core/src/web_search.rs"><code>core/src/web_search.rs</code></a>，view_image 的 handler 在 <a href="../../codex/codex-rs/core/src/tools/handlers/view_image.rs"><code>core/src/tools/handlers/view_image.rs</code></a>；三类事件都定义在 <a href="../../codex/codex-rs/protocol/src/protocol.rs"><code>protocol/src/protocol.rs</code></a> 的 <code>EventMsg</code> 枚举里。</p>
+<p><strong>走一遍</strong>（用 <code>--demo</code> 的真实输出，看每步数据长什么样、为什么）：</p>
+<p><code>--demo</code> 不碰模型、不联网，把三个工具依次跑一遍。挑几步看：</p>
+<p>① 调 <code>update_plan</code>，提交一份 3 步清单（一步 <code>completed</code>、一步 <code>in_progress</code>、一步 <code>pending</code>）。handler 先发事件、再渲染、最后回一句话：</p>
+<pre><code class="language-text">  ⟦event⟧ PlanUpdate explanation=&#x27;Triage with help from the new tools&#x27; steps=3
+── plan ──────────────────────────────
+Triage with help from the new tools
+  [x] Search docs for the API        ← completed
+  [~] Inspect the screenshot         ← in_progress（至多一个）
+  [ ] Write the fix                  ← pending
+──────────────────────────────────────
+handler 回给模型 → Plan updated</code></pre>
+<p>注意回给<strong>模型</strong>的只有 <code>&quot;Plan updated&quot;</code> 五个字——不回显整张表（省 token，模型本来就刚发过它）；那张漂亮的清单是发给<strong>前端</strong>看的。这正是&quot;对模型说一句话、对前端发一个事件&quot;的分工。</p>
+<p>② 故意提交两个 <code>in_progress</code>，handler 当场拒绝——这是&quot;至多一个进行中&quot;的硬约束在起作用：</p>
+<pre><code class="language-text">rejected → Error: at most one step may be in_progress at a time</code></pre>
+<p>③ 调 <code>web_search(&quot;codex&quot;)</code>。注意它被<strong>一对</strong> Begin/End 事件夹住，<code>call_id</code> 相同（<code>call_1</code>）——前端就靠这把钥匙把&quot;搜索中&quot;原地更新成结果：</p>
+<pre><code class="language-text">  ⟦event⟧ WebSearchBegin call_id=&#x27;call_1&#x27;
+  ⟦event⟧ WebSearchEnd call_id=&#x27;call_1&#x27; query=&#x27;codex&#x27; action=&#x27;search&#x27;
+- OpenAI Codex — coding agent
+  https://openai.com/codex
+  ...</code></pre>
+<p>④ 调 <code>view_image</code> 看一张临时造出来的 1 像素 PNG。它读了字节、靠 8 字节魔数 <code>\x89PNG…</code> 嗅出 <code>image/png</code>，回的是<strong>元数据</strong>而非视觉内容；同样被 Begin/End 夹住：</p>
+<pre><code class="language-text">  ⟦event⟧ ViewImageBegin call_id=&#x27;call_2&#x27; path=&#x27;…/_demo_pixel.png&#x27;
+  ⟦event⟧ ViewImageEnd   call_id=&#x27;call_2&#x27; path=&#x27;…/_demo_pixel.png&#x27;
+viewed image: name=_demo_pixel.png type=image/png size=32 bytes (... metadata only)</code></pre>
+<p>⑤ 最后用一个不存在的路径调 <code>view_image</code>，看错误如何回灌给模型——<strong>注意即便出错，Begin 之后我们也补了一个 End</strong>，不给前端留下&quot;只有 Begin、没有 End&quot;的悬空事件：</p>
+<pre><code class="language-text">  ⟦event⟧ ViewImageBegin call_id=&#x27;call_3&#x27; path=&#x27;…/_does_not_exist.png&#x27;
+  ⟦event⟧ ViewImageEnd   call_id=&#x27;call_3&#x27; path=&#x27;…/_does_not_exist.png&#x27;
+Error: image path is not a file: _does_not_exist.png</code></pre>
+<p>跑完 demo 会自动删掉那个临时 PNG。整条链路里，循环逻辑一行没动——新增的全在三个 handler 内部。</p>
+<h2 id="生产级工具输出会爆截断要稳且在字符边界上">生产级：工具输出会爆——截断要稳，且在字符边界上</h2>
+<p>plan / web_search / view_image 这些工具，输出可能很大：一次网页搜索几十条结果、一张图几 MB、一个长计划几百行。原样喂回模型，轻则烧光上下文、重则一条工具结果就把窗口顶爆。生产级对工具输出有两条铁律：</p>
+<ul><li><strong>截断有上限</strong>：每个工具输出有一个最大长度，超了就裁（保留头部 + 标注&quot;还有 N 字符省略&quot;）。这和 <a href="../s02_tool_use/index.html">s02 的 dispatch</a>、<a href="../s07_context_compaction/index.html">s07 的压缩</a> 是一条线——<strong>任何进上下文的东西都得有预算</strong>。</li><li><strong>在字符边界上裁，别切坏多字节字符</strong>：UTF-8 里一个汉字/emoji 是多个字节，从中间砍一刀会切出半个乱码字符。真 Codex 用 <code>truncate_to_char_boundary</code>（<a href="../../codex/codex-rs/core/src/tools/handlers/list_available_plugins_to_install.rs"><code>tools/handlers/list_available_plugins_to_install.rs:100</code></a>）——按<strong>字符</strong>而非<strong>字节</strong>截断。一个只截字节数的玩具会在这里悄悄吐出乱码。</li></ul>
+<blockquote>一句话：加工具容易，但每加一个能产出大输出的工具，就多一个&quot;撑爆上下文/吐出乱码&quot;的入口——生产级要在每个出口都把输出<strong>有上限、按字符边界</strong>地收住。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<p>这三个工具，两家<strong>几乎都有</strong>（这正是看点）：计划清单、网页搜索、看图。分野不在&quot;有没有&quot;,而在&quot;工具的过程怎么暴露给前端&quot;。</p>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th><th>关系</th></tr></thead><tbody><tr><td>计划清单</td><td><code>TodoWrite</code>（<code>{content, status, activeForm}</code>）</td><td><code>update_plan</code>（<code>{step, status}</code>，<a href="../../codex/codex-rs/core/src/tools/handlers/plan.rs"><code>plan.rs</code></a>）</td><td><strong>≈</strong> 都重发完整清单、三态状态、至多一个进行中</td></tr><tr><td>网页搜索</td><td>有（<code>WebSearch</code> / <code>WebFetch</code>，harness 执行）</td><td>有（<code>web_search</code>，多为 <strong>OpenAI 托管</strong>执行；<a href="../../codex/codex-rs/core/src/web_search.rs"><code>web_search.rs</code></a>）</td><td><strong>≈</strong> 都有；执行落点不同</td></tr><tr><td>看图</td><td>有（<code>Read</code> 能读图片、走视觉）</td><td>有（<code>view_image</code> 把图解码后附进请求；<a href="../../codex/codex-rs/core/src/tools/handlers/view_image.rs"><code>view_image.rs</code></a>）</td><td><strong>≈</strong> 都有</td></tr><tr><td>工具过程怎么暴露</td><td>工具结果 + 单一 UI 内置渲染</td><td><strong>每个动作发显式 Begin/End 协议事件</strong>，流过 EQ 给多前端</td><td>分野在这里</td></tr><tr><td>加一个工具要改什么</td><td>注册 handler（循环不变）</td><td>注册 handler（循环不变）<strong>+ 让它发事件</strong></td><td>Codex 多一层可观测约定</td></tr></tbody></table>
+<p><strong>为什么两边的工具这么像、分野却落在&quot;事件&quot;上?</strong> 因为&quot;加能力&quot;这件事本身是通用的——给模型一张菜单、按名字查表执行——所以两家在 <code>TodoWrite</code> ≈ <code>update_plan</code>、搜索、看图上几乎收敛到同一形状（连&quot;重发完整清单&quot;这种细节都一样）。真正拉开差距的是<strong>架构</strong>：Codex 是&quot;一个 core、多个前端&quot;（<a href="../s11_frontends/index.html">s11</a>）——TUI、<code>codex exec</code>、IDE 后端都要能实时显示&quot;正在搜索 codex…&quot;&quot;正在查看 shot.png…&quot;。要做到这点，core 就<strong>不能把工具过程藏在一次函数返回里</strong>，必须把它<strong>广播成事件</strong>。于是 <code>WebSearchBegin</code>/<code>WebSearchEnd</code>/<code>ViewImageToolCall</code>/<code>PlanUpdate</code> 与 <code>ExecBegin</code>/<code>ExecEnd</code>（<a href="../s04_approval/index.html">s04</a> 见过）并列，构成一套统一的&quot;可观测动作&quot;词汇表。Claude Code 更偏单一交互前端，工具过程交给那一个 UI 内置渲染即可，不必先抽象成跨前端的协议事件。</p>
+<blockquote>一句话：<strong>两家&quot;有什么工具&quot;几乎一样；Codex 多坚持一条——&quot;工具在干什么&quot;必须建模成协议事件，好让任意前端（含无人值守的 <code>codex exec</code>）都能观测每一步。</strong> 这正是全课主线&quot;Codex 为低人工干预的自主运行下注&quot;在工具层的体现。</blockquote>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<details>
+<summary>一、真 PlanHandler 几乎不存计划，只发一个事件转手就忘</summary>
+<p>教学版把计划存进 <code>CURRENT_PLAN</code> 并直接 <code>print</code>。真 <a href="../../codex/codex-rs/core/src/tools/handlers/plan.rs"><code>plan.rs</code></a> 的 <code>PlanHandler::handle</code> 干的事极少：</p>
+<pre><code class="language-rust">let args = parse_update_plan_arguments(&amp;arguments)?;                  // 解析 UpdatePlanArgs
+session.send_event(turn.as_ref(), EventMsg::PlanUpdate(args)).await;  // 广播事件
+Ok(boxed_tool_output(PlanToolOutput))                                 // 回模型 &quot;Plan updated&quot;</code></pre>
+<p>注意它<strong>没有把计划存进 session 状态</strong>——它把整份 <code>UpdatePlanArgs</code> 原样塞进一个 <code>PlanUpdate</code> 事件 send 出去，由消费事件的前端（TUI 的历史单元）去保存和渲染。&quot;计划活在上下文之外&quot;在真身里更彻底：它活在<strong>前端的事件历史</strong>里，core 转手就忘。回给模型的永远是常量 <code>PLAN_UPDATED_MESSAGE</code>（就是字符串 <code>&quot;Plan updated&quot;</code>），不回显整张表——省 token，且模型本来就刚发过它。</p>
+<table><thead><tr><th></th><th>教学版</th><th>真 codex-rs</th></tr></thead><tbody><tr><td>计划存哪</td><td>core 进程内存 <code>CURRENT_PLAN</code></td><td>不存于 core；随 <code>PlanUpdate</code> 事件流向前端</td></tr><tr><td>渲染</td><td>直接 <code>print</code></td><td>TUI/IDE 消费事件后各自渲染</td></tr><tr><td>回模型</td><td><code>&quot;Plan updated&quot;</code></td><td><code>PLAN_UPDATED_MESSAGE = &quot;Plan updated&quot;</code>（一字相同）</td></tr></tbody></table>
+</details>
+<details>
+<summary>二、计划的 status 是枚举，schema 由 plan_spec 程序化生成</summary>
+<p>教学版的 <code>status</code> 是字符串 + 一个 <code>VALID_STATUS</code> 集合手工校验。真源码用 Rust 枚举 <code>StepStatus { Pending, InProgress, Completed }</code>，配 <code>#[serde(rename_all = &quot;snake_case&quot;)]</code>，保证上线时是 <code>pending</code>/<code>in_progress</code>/<code>completed</code>——非法值在反序列化 <code>UpdatePlanArgs</code> 时就被 serde 直接拒掉，根本进不了 handler（教学版则是进了 handler 才校验）。</p>
+<p>工具的 JSON schema 也不是手写的，而是 <a href="../../codex/codex-rs/core/src/tools/handlers/plan_spec.rs"><code>plan_spec.rs</code></a> 里 <code>create_update_plan_tool()</code> 程序化拼出来的：</p>
+<pre><code class="language-rust">JsonSchema::string_enum(
+    vec![json!(&quot;pending&quot;), json!(&quot;in_progress&quot;), json!(&quot;completed&quot;)], ...)
+// plan 是 array&lt;object{step, status}&gt;，required = [&quot;plan&quot;]</code></pre>
+<p>我们手写的那份 <code>TOOLS[0][&quot;parameters&quot;]</code> 跟它逐字段对应。描述里那句 &quot;At most one step can be in_progress at a time.&quot; <strong>逐字</strong>来自真源码——它是写进<strong>给模型看的工具描述</strong>里的软约束；我们在 handler 里又加了一道硬校验（拒绝两个 <code>in_progress</code>），两道防线一软一硬。</p>
+</details>
+<details>
+<summary>三、真 web_search 多为 OpenAI 托管工具，core 只负责事件与展示</summary>
+<p>教学版的 <code>web_search</code> 是个本地函数，查一张内置 <code>_CANNED</code> 表。真 Codex 的 <code>web_search</code> <strong>通常不在 core 里执行</strong>——它是 <code>ToolSpec::WebSearch</code> 这个特殊变体（<a href="../s02_tool_use/index.html">s02</a> 深入里见过的工具规格变体之一），序列化成 <code>{&quot;type&quot;:&quot;web_search&quot;, ...}</code> 发给模型；搜索由 <strong>OpenAI 的 Responses API 托管端</strong>完成，结果直接回到模型上下文。</p>
+<p>core 这边的 <a href="../../codex/codex-rs/core/src/web_search.rs"><code>web_search.rs</code></a> 主要负责<strong>把搜索动作格式化给前端看</strong>——<code>web_search_action_detail</code> 把 <code>WebSearchAction</code>（<code>Search{query, queries}</code> / <code>OpenPage{url}</code> / <code>FindInPage{url, pattern}</code> / <code>Other</code>）渲染成一行人类可读文字；成对的 <code>WebSearchBeginEvent</code>/<code>WebSearchEndEvent</code> 则定义在 <a href="../../codex/codex-rs/protocol/src/protocol.rs"><code>protocol/src/protocol.rs</code></a>。也就是说真身的分工是：搜索托管在远端、<strong>事件与展示</strong>留在 core。教学版没有远端，于是把&quot;假装搜索&quot;和&quot;发事件&quot;都塞进一个本地函数，但保留了 Begin/End 这层可观测骨架。</p>
+<table><thead><tr><th></th><th>教学版</th><th>真 codex-rs</th></tr></thead><tbody><tr><td>谁执行搜索</td><td>本地查 <code>_CANNED</code> 表</td><td>OpenAI 托管端（<code>type:&quot;web_search&quot;</code>）</td></tr><tr><td>core 的职责</td><td>假装搜 + 发事件</td><td>格式化 <code>WebSearchAction</code> + 发 Begin/End</td></tr><tr><td>End 事件字段</td><td><code>call_id, query, action=&quot;search&quot;</code>（字符串）</td><td><code>call_id, query, action: WebSearchAction</code>（带子查询/URL 等结构）</td></tr></tbody></table>
+</details>
+<details>
+<summary>四、真 view_image 把图片解码、resize、作为 InputImage 附进请求</summary>
+<p>教学版的 <code>view_image</code> 只 <code>read_bytes()</code> + 嗅探魔数 + 回一句元数据。真 <a href="../../codex/codex-rs/core/src/tools/handlers/view_image.rs"><code>view_image.rs</code></a> 的 <code>ViewImageHandler</code> 做的远不止：</p>
+<ol><li>先查模型 <code>input_modalities</code> 是否含 <code>Image</code>——不支持就直接拒，回那句固定的 <code>&quot;view_image is not allowed because you do not support image inputs&quot;</code>。</li><li>经沙箱化的 filesystem 读字节，用 <code>load_for_prompt_bytes</code>（<code>codex_utils_image</code>）<strong>真正解码并 resize</strong>（默认按 <code>PromptImageMode</code> 缩放，可选保留原图）。</li><li>把图片转成 base64 <strong>data URL</strong>，作为 <code>InputImage</code> 塞进工具输出——于是图片<strong>作为视觉输入进了下一次 Responses 请求</strong>，模型真能&quot;看见&quot;。</li><li>随 <code>TurnItem::ImageView</code> 发 <code>started</code>/<code>completed</code>，对应 <code>ViewImageToolCallEvent { call_id, path }</code>。</li></ol>
+<p>教学版第 3 步整个砍掉（不做真视觉、不附 data URL），只保留&quot;读文件 + 发 Begin/End 事件 + 回元数据&quot;。<code>detail</code> 字段（真身只接受 <code>high</code> / <code>original</code>，给别的值会报错）这类细节我们也省了。一句话对照：<strong>教学版的 view_image 是&quot;嗅一下文件头&quot;，真身是&quot;先确认模型能看图，再解码、缩放、附成视觉输入&quot;。</strong></p>
+<p>为什么真身要 resize 而不是原图直传？因为视觉模型对超大图既贵又慢，默认缩放在&quot;看得清&quot;和&quot;省 token&quot;之间取平衡；只有显式要 <code>original</code> 且模型支持时才保留原分辨率。</p>
+</details>
+<details>
+<summary>五、Begin/End 事件如何流到 TUI（连回 s10 / s11）</summary>
+<p><code>PlanUpdate</code> / <code>WebSearchBegin</code> / <code>WebSearchEnd</code> / <code>ViewImageToolCall</code> 都是 <a href="../s10_sq_eq_protocol/index.html">s10</a> 事件队列（EQ）里 <code>EventMsg</code> 枚举的变体。它们由 core 在 handler 里 <code>session.send_event(...)</code> 产出，经 EQ 流到前端（<a href="../s11_frontends/index.html">s11</a>）。</p>
+<p><code>call_id</code> 是把 Begin 和 End 配对的钥匙：TUI 收到 <code>WebSearchBegin{call_id}</code> 先画一行&quot;搜索中&quot;,收到同 <code>call_id</code> 的 <code>WebSearchEnd</code> 再原地更新成搜了什么。这正是 SQ/EQ 解耦的价值——core 只管&quot;按时序吐事件&quot;,三个前端（TUI、<code>codex exec</code>、IDE 后端）各自决定怎么画。我们的 <code>emit()</code> 就是这条链路被压扁成一行 <code>print</code> 的样子。也正因为有这把钥匙，handler 里<strong>即便出错也要补发 End</strong>（看我们 <code>view_image</code> 失败分支），否则前端会留下一个永远停在&quot;进行中&quot;的悬空条目。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s12_tools_extra/code.py --demo   # 离线：update_plan + web_search(canned) + view_image(元数据) + 生命周期事件
+python s12_tools_extra/code.py          # 交互模式（mock 后端，无需 key）</code></pre>
+<p><code>--demo</code> 会在当前目录建一个临时 <code>_demo_pixel.png</code>，跑完自动删除；<code>web_search</code> 永不联网。默认 <code>backend=mock</code>，离线可跑；想接真模型见根目录 <a href="../.env.example">.env.example</a>。</p>
+<h2 id="小结">小结</h2>
+<ul><li>&quot;给 agent 更多工具&quot;= 多印一行菜单（schema）+ 往 <code>HANDLERS</code> 多注册一个 handler——回合循环<strong>一字不改</strong>（呼应 <a href="../s02_tool_use/index.html">s02</a>）。本章一口气加了三个。</li><li>新维度是<strong>可观测</strong>：Codex 把每次工具动作建模成事件——<code>PlanUpdate</code>、成对的 <code>WebSearchBegin</code>/<code>WebSearchEnd</code>、<code>ViewImageToolCall</code>——用 <code>call_id</code> 把 Begin/End 配对，让任意前端实时显示进度。</li><li>真身里：<code>update_plan</code> 的 handler 转手就忘、只发事件（计划活在前端历史里）；<code>web_search</code> 多由 OpenAI 托管端执行、core 只管格式化与事件；<code>view_image</code> 会先确认模型支持图像，再解码、resize、把图作为 <code>InputImage</code> 附进下一次请求。</li><li>与 Claude Code <strong>≈</strong>：计划（<code>TodoWrite</code>）/搜索/看图两家都有；分野在 Codex 把每个动作抽象成跨前端的协议事件（<a href="../s10_sq_eq_protocol/index.html">s10</a> / <a href="../s11_frontends/index.html">s11</a>），服务于&quot;一个 core、多个前端&quot;。</li><li><strong>生产级</strong>：工具输出会爆——必须有长度上限并截断，且在<strong>字符边界</strong>上裁（<code>truncate_to_char_boundary</code>，别切坏多字节字符）；任何进上下文的东西都得有预算（见「生产级」一节）。</li><li>下一站 <a href="../s13_hooks/index.html">s13</a>：Hooks——在工具调用前后插入用户自定义逻辑，进一步扩展 agent 而不必 fork 掉 core。</li></ul>
+<h2 id="思考">思考</h2>
+<div class="think">
+<ol><li>本章加三个工具，循环一行没改——这说明&quot;加能力&quot;是声明式的。那么一个 agent 的&quot;上限&quot;到底由什么决定：工具的<strong>数量</strong>，还是模型<strong>会不会在对的时机点对的工具</strong>？如果你的 agent 配了 20 个工具却老是点错，你会先加第 21 个，还是先改菜单上的<strong>描述</strong>？</li></ol>
+<ol><li>一次工具调用发 <code>Begin</code> 和 <code>End</code> 两个事件，比只发一个&quot;完成&quot;事件多了什么？如果某次 <code>web_search</code> 跑到一半被用户打断（<a href="../s10_sq_eq_protocol/index.html">s10</a> 的 Interrupt），只有 <code>Begin</code> 没有 <code>End</code> 的&quot;悬空事件&quot;前端该怎么收场？（提示：想想我们 <code>view_image</code> 出错时为什么也补了一个 End。）</li></ol>
+<ol><li><code>web_search</code> 在 Codex 里多半是 OpenAI 托管执行、结果直接回模型；如果让你改成&quot;core 自己用一个搜索 API 执行&quot;,你会失去什么、又会获得什么？（想想无网/离线环境、可控性、以及&quot;谁为搜索质量负责&quot;。）</li></ol>
+<ol><li>真 <code>view_image</code> 会先缩放再喂给模型，在&quot;省 token / 跑得快&quot;和&quot;别丢失模型需要看清的细节&quot;之间权衡。如果是一张满是小字的报错截图，默认缩放可能让模型看不清——&quot;要不要保留原图&quot;这个决定，你会交给模型自己判断，还是交给用户?为什么?</li></ol>
+<ol><li>Claude Code 把工具过程交给单一 UI 内置渲染，Codex 把它抽象成跨前端的协议事件。当你的产品<strong>只有一个前端</strong>时，后者这套&quot;事件词汇表&quot;是不是过度设计?反过来，等你哪天要加第二个前端，没有它又会有多痛?这条&quot;为多前端提前下注&quot;的取舍，扣回全课主线——你觉得它值不值?</li></ol>
+</div>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

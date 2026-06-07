@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s16: Config — 分层解析与命名 profile</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s16-config-分层解析与命名-profile">s16: Config — 分层解析与命名 profile</h1>
+<blockquote><em>&quot;一个开关切换一整套自主度：prod 上谨慎，草稿仓里放飞。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s15_mcp/index.html">s15 MCP</a> → <strong>s16</strong> → <a href="../s17_comprehensive/index.html">s17 综合：迷你 Codex</a></p>
+<hr>
+<h2 id="先把思想说透为什么行为不该写死而要分层叠出来">先把思想说透：为什么行为不该写死，而要「分层叠出来」</h2>
+<p>走到这章，Codex 已经攒下一大堆可调项：用哪个模型、审批多严（<a href="../s04_approval/index.html">s04</a>）、沙箱开到哪档（<a href="../s05_sandbox/index.html">s05</a>）、挂哪些 MCP server（<a href="../s15_mcp/index.html">s15</a>）……如果你只把「配置」想成「一个写着设置的文件」，会错过 Codex 真正巧妙的地方。它要解决的其实是一个更深的问题：<strong>同一个 agent，在不同场景下该有完全不同的「胆量」，而这份胆量不能写死、还得能一秒切换、还得让企业从上面压得住。</strong> 想通下面三个道理，这套看似繁琐的机制就一目了然了。</p>
+<p><strong>道理一：「该用什么值」强烈依赖你在哪、在干什么——所以不能写死。</strong> 在公司的 prod 仓库里替别人改代码，你要的是：审批要严、沙箱要紧、模型要稳——出事代价太高。可在自己 <code>/tmp</code> 下的一次性草稿仓里跑实验，你要的恰恰相反：别每条命令都问我、给我全权限、推理拉满——我要的是速度。<strong>同一个 agent，两种场景，几乎每一项设置都该反着来。</strong> 把任何一套值硬编码进程序，都必然在另一个场景里碍事。配置存在的第一个理由，就是把「行为」从代码里拽出来，变成可以随场景换的东西。</p>
+<p><strong>道理二：与其每次拼一长串 flag，不如把「一整套场景」打包成一个名字。</strong> 就算值可以外置，如果它们散落在十几个命令行 flag 里，每次切场景你都得敲 <code>--approval … --sandbox … --model …</code> 一长串——记不住，还容易切错一半（把沙箱放开了却忘了关审批）。巧办法是把「一整套场景配置」打包起来、起个名字，这就是 <strong>profile</strong>：名叫 <code>safe</code> 的 profile 里写好「要审批 + 只能在工作区写文件」，名叫 <code>yolo</code> 的写好「不审批 + 全部放行」。切场景从此只要一个名字——<code>--profile safe</code> 或 <code>--profile yolo</code>。这就像手机的「情景模式」：「会议模式」一键静音加震动，你不用挨个去关铃声、开震动。<strong>profile 就是 agent 的情景模式，它把一组「自主度旋钮」捆成一个开关。</strong></p>
+<p><strong>道理三（最关键）：同一项设置会被好几个地方写到，谁说了算？让来源「分层」，后写的盖前写的。</strong> 现在有了 profile，新问题冒出来了：「用哪个模型」这一项，系统自带一个默认值、你的配置文件 <code>config.toml</code>（一种给人手写的设置格式，<code>model = &quot;gpt-5-codex&quot;</code> 这样，比 JSON 更省引号大括号）写了一个、你选的 profile 又写了一个、这次启动命令行临时还想再换一个——<strong>到底哪个算数？</strong> Codex 的答案干净利落：把这些来源<strong>从低到高排成几层</strong>，<strong>后面的层盖住前面的层</strong>（业内叫 <em>last-wins</em>）。这就像一摞透明胶片叠着往下看——上面那张写了字的地方挡住下面，没写字（透明）的地方露出下层。但「叠」不是把整层粗暴替换，而是<strong>逐项合并</strong>（deep-merge）：上层写了的用上层的，上层没提的保留下层的，遇到「设置里还套设置」就钻进去接着逐项合。所以一个 profile 只想改沙箱、没提模型时，模型就自动沿用下层的值、不会被抹掉。这一层「谁能盖谁」的规则，正是企业能从最上面压一道「这台机器只能 read-only」的底气所在。</p>
+<p>把这三点连起来：<strong><code>config.toml</code> 里写着若干 profile；选中一个后，它和系统默认、命令行覆盖一起，经 deep-merge 按「后层盖前层」分层解析成「这次真正生效的一份配置」。</strong> 一个开关（profile 名）就切换一整套自主度——prod 上谨慎、草稿仓里放飞。这一章就用 30 行 Python，把这套机制连同「每个字段到底是哪一层赢的」都摊给你看。</p>
+<h2 id="问题">问题</h2>
+<p>到这一章，Codex 已经攒了一大堆可调项：用哪个模型、审批策略多严（<a href="../s04_approval/index.html">s04</a>）、沙箱开到哪一档（<a href="../s05_sandbox/index.html">s05</a>）、推理力度多大、挂哪些 MCP server（<a href="../s15_mcp/index.html">s15</a>）……</p>
+<p>但「该用什么值」<strong>强烈依赖你在哪、在干什么</strong>：</p>
+<ul><li>在公司的 prod 仓库里替别人改代码：审批要严、沙箱要紧、模型要稳——出事代价高。</li><li>在自己 <code>/tmp</code> 下的一次性草稿仓里跑实验：别每条命令都问我、给我全权限、推理拉满——我要的是速度。</li></ul>
+<p>如果这些值散落在十几个命令行 flag 里，每次切换场景你都得敲一长串 <code>--approval … --sandbox … --model …</code>，记不住也容易敲错。更糟的是：值可能来自多个地方——你写的 <code>config.toml</code>、企业下发的策略、这次启动临时加的 <code>-c</code>——<strong>到底哪个生效？</strong> 没有清晰的优先级规则，配置就是一团乱麻。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>两件事：<strong>命名 profile</strong>把「一整套场景配置」打包成一个名字；<strong>分层解析</strong>用一条明确的优先级链把多个来源合成一份生效配置——<strong>后面的层覆盖前面的层（last-wins）</strong>。</p>
+<pre><code>   低优先级 ───────────────────────────────────────────▶ 高优先级
+   ┌──────────┐  ┌──────────────┐  ┌───────────────┐  ┌──────────┐
+   │ DEFAULTS │→ │ config.toml  │→ │ 选中的 profile │→ │ 运行时    │
+   │ 系统默认  │  │ 顶层（你的全局）│  │ safe / yolo … │  │ 覆盖(-c)  │
+   └──────────┘  └──────────────┘  └───────────────┘  └──────────┘
+        每一层只覆盖它显式写了的字段，其余沿用下层 —— deep-merge
+
+   profile = &quot;safe&quot;                    profile = &quot;yolo&quot;
+   ┌─────────────────────────┐         ┌─────────────────────────┐
+   │ approval = untrusted     │         │ approval = never         │
+   │ sandbox  = workspace-write│        │ sandbox  = danger-full   │
+   │  → prod / 别人的仓库      │         │  → 一次性草稿仓           │
+   └─────────────────────────┘         └─────────────────────────┘</code></pre>
+<p>切场景从此只要一个名字：<code>--profile safe</code> 或 <code>--profile yolo</code>。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>，三块：</p>
+<p><strong>第 1 步 — 零依赖地拿到 config。</strong> 优先用标准库 <code>tomllib</code>（3.11+）读 <code>config.toml</code>；环境没有它（或没有文件）就退回一个内嵌的 sample dict——<strong>绝不引入 pip 依赖</strong>：</p>
+<pre><code class="language-python">try:
+    import tomllib            # Python 3.11+
+except ImportError:
+    tomllib = None            # 退回内嵌 SAMPLE_CONFIG</code></pre>
+<p><code>SAMPLE_CONFIG</code> 的形状刻意对齐真源码的 <code>ConfigToml</code>：顶层默认 + 一个 <code>profiles</code> 映射 + 一个 <code>profile</code>（默认选谁）。两个 profile 的字段取值也对齐真枚举——<code>approval_policy ∈ {untrusted, on-failure, on-request, never}</code>（<code>AskForApproval</code>）、<code>sandbox_mode ∈ {read-only, workspace-write, danger-full-access}</code>（<code>SandboxMode</code>）。</p>
+<p><strong>第 2 步 — deep-merge：overlay 赢。</strong> 这正是 <a href="../../codex/codex-rs/config/src/merge.rs"><code>merge.rs</code></a> 里 <code>merge_toml_values</code> 的语义——两边都是表就递归合并，否则 overlay 整个盖掉：</p>
+<pre><code class="language-python">def deep_merge(base, overlay):
+    out = dict(base)
+    for key, val in overlay.items():
+        if isinstance(val, dict) and isinstance(out.get(key), dict):
+            out[key] = deep_merge(out[key], val)   # 嵌套表递归
+        else:
+            out[key] = val                          # 标量：overlay 直接盖
+    return out</code></pre>
+<p><strong>第 3 步 — <code>resolve()</code> 按四层叠加，并记录每个字段「哪层赢了」。</strong> 这个 provenance（来源追踪）是本章的看点——它让「last-wins」从抽象规则变成肉眼可见：</p>
+<pre><code class="language-python">eff = dict(DEFAULTS)                              # 第0层：系统默认
+eff = lay(eff, top, &quot;config.toml&quot;)               # 第1层：config.toml 顶层
+eff = lay(eff, prof, f&quot;profile:{chosen}&quot;)        # 第2层：选中的 profile
+eff = lay(eff, overrides, &quot;override&quot;)            # 第3层：运行时覆盖（最高）</code></pre>
+<p><code>--demo</code> 解析 <code>safe</code> 和 <code>yolo</code> 两个 profile，逐字段打印「生效值 + 来自哪一层」，并加一块「yolo + 运行时覆盖 model」演示最高层如何盖掉 profile 给的值（last-wins）。<code>PROFILE_FIELDS</code> 限定 profile 只能覆盖它该覆盖的字段——对应真版 <code>ConfigProfile</code> 上的 <code>#[serde(deny_unknown_fields)]</code>。</p>
+<p><strong>走一遍</strong>：跟着一次 <code>resolve(cfg, &quot;yolo&quot;, overrides={&quot;model&quot;: &quot;gpt-5-codex-mini&quot;})</code> 看「四层胶片」怎么一张张叠出最终配置。我们盯住一个字段 <code>model</code>，看它在每一层被写成什么、最后谁赢。</p>
+<p>第 0 层 <strong>DEFAULTS</strong>（系统默认，最底下那张胶片）——所有字段都有个保底值：</p>
+<pre><code class="language-python">{&quot;model&quot;: &quot;gpt-5-codex&quot;, &quot;approval_policy&quot;: &quot;on-request&quot;,
+ &quot;sandbox_mode&quot;: &quot;read-only&quot;, &quot;model_reasoning_effort&quot;: &quot;medium&quot;}
+# provenance: 此刻每个字段都记成 &quot;default&quot;</code></pre>
+<p>第 1 层 <strong>config.toml 顶层</strong>——<code>SAMPLE_CONFIG</code> 的顶层只写了一个 <code>model</code>（把默认模型升一档），别的没提：</p>
+<pre><code class="language-python">overlay = {&quot;model&quot;: &quot;gpt-5-codex-high&quot;}     # 只有这一个字段
+# deep-merge 后 model 变成 gpt-5-codex-high；其余沿用第 0 层（胶片没盖到的地方露出下层）
+# provenance[&quot;model&quot;] = &quot;config.toml&quot;</code></pre>
+<p>第 2 层 <strong>profile = yolo</strong>——这是 <code>yolo</code> 这张胶片写的内容（注意它<strong>没写</strong> <code>model</code>）：</p>
+<pre><code class="language-python">{&quot;approval_policy&quot;: &quot;never&quot;, &quot;sandbox_mode&quot;: &quot;danger-full-access&quot;,
+ &quot;model_reasoning_effort&quot;: &quot;high&quot;}
+# 它改了 approval / sandbox / reasoning 三项；model 这一格是透明的 → 仍露出第 1 层的 gpt-5-codex-high
+# provenance: approval_policy→&quot;profile:yolo&quot;, sandbox_mode→&quot;profile:yolo&quot;, model_reasoning_effort→&quot;profile:yolo&quot;</code></pre>
+<p>第 3 层 <strong>运行时覆盖</strong>（最顶上那张，优先级最高）——我们这次启动临时传了 <code>{&quot;model&quot;: &quot;gpt-5-codex-mini&quot;}</code>：</p>
+<pre><code class="language-python">{&quot;model&quot;: &quot;gpt-5-codex-mini&quot;}
+# model 被这张最高层胶片盖成 gpt-5-codex-mini —— 第 1 层写的 high 被压在下面看不见了
+# provenance[&quot;model&quot;] = &quot;override&quot;   ← model 的归属从 config.toml 变成了 override</code></pre>
+<p><strong>为什么结果是这样</strong>：<code>model</code> 一路被写了三次（default→config.toml→override），但 provenance 最后记的是 <code>override</code>，因为它是最高层、最后一个动这个字段的——这就是 last-wins。而 <code>approval_policy</code> 只有 <code>yolo</code> 那层写过，所以归 <code>profile:yolo</code>。最终 <code>--demo</code> 第 ③ 块打印出来的就是：</p>
+<pre><code>字段                    生效值                来自哪一层
+model                   gpt-5-codex-mini      override        ← 被运行时覆盖盖掉
+approval_policy         never                 profile:yolo
+sandbox_mode            danger-full-access    profile:yolo
+model_reasoning_effort  high                  profile:yolo</code></pre>
+<p>看懂这张表，你就看懂了整套分层配置：<strong>每个字段独立地「往上数到最后写它的那一层」，那层的值就是生效值。</strong></p>
+<h2 id="生产级在边界上校验坏配置在-load-时就拒不拖到运行时">生产级：在边界上校验——坏配置在 load 时就拒，不拖到运行时</h2>
+<p>分层解析很优雅，但它有个隐患：如果一个 profile 写了 <code>approval_policy = &quot;yolo-mode&quot;</code>（一个不存在的档位）、或把字段名拼成 <code>sandbox_modee</code>，会怎样？一个宽松的解析器会<strong>默默接受</strong>——然后你的 agent 带着一个谁也不认识的审批策略上路，等到运行时行为诡异了才发现。生产级的答案是：<strong>在加载的边界上严格校验，坏配置当场拒绝、报清楚错在哪。</strong></p>
+<p>真 Codex 用两件武器（都在类型层面）：</p>
+<ul><li><strong><code>#[serde(deny_unknown_fields)]</code></strong>：拼错的字段名（<code>sandbox_modee</code>）不会被悄悄忽略，而是直接 parse 失败。</li><li><strong>typed enum</strong>：<code>approval_policy</code> 的类型就是 <code>AskForApproval</code> 枚举，<code>&quot;yolo-mode&quot;</code> 根本反序列化不进去——非法值在 load 时就被挡掉。</li></ul>
+<p>本章 <code>validate_profile</code> 把这套教学化，<code>--demo</code> 拿一个三处都错的 profile 演示：</p>
+<pre><code>✗ profile &#x27;typo&#x27;: `approval_policy`=&#x27;yolo-mode&#x27; 非法（合法：[&#x27;never&#x27;,&#x27;on-failure&#x27;,&#x27;on-request&#x27;,&#x27;untrusted&#x27;]）
+✗ profile &#x27;typo&#x27;: 未知字段 `sandbox_modee`（合法：[&#x27;approval_policy&#x27;,&#x27;model&#x27;,&#x27;model_reasoning_effort&#x27;,&#x27;sandbox_mode&#x27;]）
+✗ profile &#x27;typo&#x27;: `model_reasoning_effort`=&#x27;extreme&#x27; 非法（合法：[&#x27;high&#x27;,&#x27;low&#x27;,&#x27;medium&#x27;]）</code></pre>
+<blockquote>一句话：配置是<strong>安全档位的总开关</strong>（它决定审批用哪档、沙箱开多大）——正因为它这么要害，越要在边界上把它焊死：<strong>宁可加载就失败，也不要带着一个错误的安全配置去跑。</strong> 这和沙箱的 deny-default、审批的 fail-closed 是同一种&quot;出错就倒向安全&quot;的工程直觉。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>配置文件</td><td><code>settings.json</code>（JSON）</td><td><code>config.toml</code>（TOML）⭐</td></tr><tr><td>切场景</td><td>改 settings / 命令行参数</td><td><strong>命名 profile</strong>：一个名字打包一整套（model + 审批 + 沙箱 + …）</td></tr><tr><td>来源合成</td><td>设置项合并</td><td><strong>显式分层栈</strong>：system → cloud → user → thread，逐层 last-wins</td></tr><tr><td>一键切自主度</td><td>较分散</td><td><code>--profile safe</code> / <code>--profile yolo</code> 一秒切换谨慎 / 放飞</td></tr></tbody></table>
+<p><strong>为什么 Codex 要搞这么一套分层 + profile？</strong> 因为它的运行场景比「单人本地交互」宽得多——同一套 core 要跑在本地终端、CI、云端，还可能受企业策略约束。这种环境天然就是<strong>多来源</strong>的：</p>
+<ul><li><strong>企业要能从上面压一层</strong>：管理员下发的策略（真版的 system / cloud 层）必须能覆盖用户的随手设置，否则在受管环境里就没法强制「这台机器只能 read-only」。分层栈给了这个能力。</li><li><strong>自主度要能一键切换</strong>：Codex 把宝押在低人工干预的自主运行上，而「该多自主」高度依赖场景。profile 把 <code>approval + sandbox + model</code> 这组「自主度旋钮」捆成一个名字——prod 用 <code>safe</code>、草稿仓用 <code>yolo</code>，不用每次手动拼一长串 flag，也不会切错一半。</li><li><strong>运行时还要能临时压一层</strong>：这次启动想换个模型？<code>-c model=…</code> 作为最高层盖上去，不动你的 <code>config.toml</code>。</li></ul>
+<p>这与全课主线一致：Claude Code 围绕<strong>交互式 UX</strong>，配置够用就行、临场点弹窗；Codex 为 <strong>headless / CI / 云</strong>下注，所以把「谁能覆盖谁」做成一套<strong>显式、可被企业接管、可一键切自主度</strong>的分层系统。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<p>教学版 <code>resolve()</code> 大约 30 行、四个层。真 Codex 的 config 子系统是 <code>codex-rs/config/</code>（仅 <code>types.rs</code> 就 35000+ 行，<code>config_requirements.rs</code> 12 万行），下面四块讲清差距。</p>
+<details>
+<summary>一、真实层栈：system → cloud → user → thread，外加企业 MDM</summary>
+<p>教学版的四层（DEFAULTS → config.toml → profile → override）是真版层栈的简化。真版的 <code>ConfigLayerStack</code>（<code>config/src/state.rs:236</code>）注释写得很直白：</p>
+<pre><code class="language-rust">/// Layers are listed from lowest precedence (base) to highest (top),
+/// so later entries in the Vec override earlier ones.   ← 和教学版 last-wins 完全一致
+layers: Vec&lt;ConfigLayerEntry&gt;,</code></pre>
+<p>每个层有个来源标签 <code>ConfigLayerSource</code>（<code>state.rs</code>）：</p>
+<table><thead><tr><th>层（低→高优先级）</th><th><code>ConfigLayerSource</code> 变体</th><th>谁写的</th></tr></thead><tbody><tr><td>企业 MDM / 受管</td><td><code>Mdm</code> / <code>EnterpriseManaged</code></td><td>设备管理策略，用户<strong>不能</strong>覆盖</td></tr><tr><td>系统</td><td><code>System { file }</code></td><td>系统级 config</td></tr><tr><td>云下发</td><td>（<code>cloud_config_layers</code>）</td><td>Codex Web / 组织下发的 fragment</td></tr><tr><td>用户</td><td><code>User { file, profile }</code></td><td>你的 <code>$CODEX_HOME/config.toml</code>（<strong>含 profile 子层</strong>）</td></tr><tr><td>项目</td><td><code>Project { dot_codex_folder }</code></td><td>仓库里的 <code>.codex/</code></td></tr><tr><td>会话 flags</td><td><code>SessionFlags</code></td><td>这次启动的 <code>-c</code> / CLI 覆盖（最高）</td></tr></tbody></table>
+<p>注意 <code>User</code> 层里其实<strong>还分两小层</strong>：基础 <code>config.toml</code> + 选中 profile 的 override（所以代码里要记一个 <code>user_layer_index</code> 指向可写的那层）。教学版把「config.toml 顶层」和「profile」拆成两层正是模仿这个。<code>merge_toml_values</code> 则是逐层合并时真正干活的函数（教学版 <code>deep_merge</code> 照搬了它）。</p>
+</details>
+<details>
+<summary>二、profile 到底能装什么：ConfigProfile 的字段全景</summary>
+<p>教学版 <code>PROFILE_FIELDS</code> 只放了 4 个字段（model / approval / sandbox / reasoning_effort）。真版 <code>ConfigProfile</code>（<code>config/src/profile_toml.rs:24</code>）能打包的远不止：</p>
+<pre><code class="language-rust">pub struct ConfigProfile {
+    pub model: Option&lt;String&gt;,
+    pub model_provider: Option&lt;String&gt;,
+    pub approval_policy: Option&lt;AskForApproval&gt;,     // ← 教学版有
+    pub sandbox_mode: Option&lt;SandboxMode&gt;,           // ← 教学版有
+    pub model_reasoning_effort: Option&lt;ReasoningEffort&gt;,
+    pub model_reasoning_summary: Option&lt;ReasoningSummary&gt;,
+    pub model_verbosity: Option&lt;Verbosity&gt;,
+    pub web_search: Option&lt;WebSearchMode&gt;,
+    pub tools: Option&lt;ToolsToml&gt;,
+    pub features: Option&lt;FeaturesToml&gt;,              // ← 见下一块「feature flags」
+    pub personality: Option&lt;Personality&gt;,
+    // …还有十几个
+}</code></pre>
+<p>每个字段都是 <code>Option&lt;T&gt;</code>：<strong><code>None</code> 表示「这个 profile 不管这一项」</strong>，于是合并时该字段沿用下层的值——这正是教学版 <code>lay()</code> 里「只把 layer 真正写了的字段记进 provenance」想表达的语义。<code>#[serde(deny_unknown_fields)]</code> 则保证你不能在 profile 里塞乱七八糟的 key（教学版用 <code>PROFILE_FIELDS</code> 白名单模拟）。</p>
+</details>
+<details>
+<summary>三、sandbox + approval + model + mcp_servers 全都活在 config 里</summary>
+<p>值得专门点出：前面几章那些机制的「配置入口」最终都汇进 <code>ConfigToml</code>（<code>config/src/config_toml.rs:139</code>）这一个结构：</p>
+<table><thead><tr><th>配置项</th><th>字段</th><th>对应章节</th></tr></thead><tbody><tr><td>用哪个模型</td><td><code>model: Option&lt;String&gt;</code></td><td>s09</td></tr><tr><td>审批策略</td><td><code>approval_policy: Option&lt;AskForApproval&gt;</code></td><td>s04</td></tr><tr><td>沙箱档位</td><td><code>sandbox_mode: Option&lt;SandboxMode&gt;</code></td><td>s05</td></tr><tr><td>权限 profile</td><td><code>permissions</code> / <code>permission_profile</code></td><td>s05 / s14</td></tr><tr><td>MCP server</td><td><code>mcp_servers: HashMap&lt;String, McpServerConfig&gt;</code></td><td>s15</td></tr><tr><td>命名 profile</td><td><code>profiles: HashMap&lt;String, ConfigProfile&gt;</code></td><td>本章</td></tr><tr><td>默认选哪个 profile</td><td><code>profile: Option&lt;String&gt;</code></td><td>本章</td></tr></tbody></table>
+<p>也就是说：<strong>config 不是某个孤立模块的设置，而是整个 agent 行为的总线</strong>。教学版只演示了 model / approval / sandbox / reasoning 四个字段的层叠，但同一套分层规则对 <code>mcp_servers</code> 这类嵌套表一样适用（<code>deep_merge</code> 会递归进去合并）——这也是为什么真版要费力实现「表递归合并」而不是简单的整体替换。</p>
+</details>
+<details>
+<summary>四、ThreadSettings：运行时覆盖配置，且不重启（接 s10）</summary>
+<p>教学版的「第 3 层 override」是个静态 dict。真版里，运行时改配置是一条 <strong><code>Op</code></strong>（接 <a href="../s10_sq_eq_protocol/index.html">s10</a> 的 SQ/EQ 协议，<code>protocol.rs:492</code>）：</p>
+<pre><code class="language-rust">Op::ThreadSettings {
+    thread_settings: ThreadSettingsOverrides,   // 改 model / 审批 / 沙箱…
+}
+// core 应用后回一个事件确认：
+EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent)</code></pre>
+<p>这就是 thread 层（最高优先级）的真身：你在会话<strong>进行到一半</strong>时切了模型或放宽了审批，前端提交一个 <code>Op::ThreadSettings</code>，core 把它当作最高层合并进生效配置、回一个 <code>ThreadSettingsApplied</code> 事件，<strong>不用重启会话</strong>。教学版没有队列，所以把它压扁成「传一个 <code>overrides</code> dict 给 <code>resolve()</code>」——但优先级位置（盖过 profile 和 config.toml）和真版一致。</p>
+<p>一句话串起来：<strong>config.toml + profile 定的是「会话开始时的初值」，<code>Op::ThreadSettings</code> 是「会话中途的临时改写」</strong>，两者落在同一条分层栈的不同高度上。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s16_config/code.py --demo   # 解析 safe / yolo，逐字段打印「哪层赢了」（无需 key，离线）
+python s16_config/code.py          # 交互模式：输入 profile 名，看生效配置</code></pre>
+<p>无外部依赖：用标准库 <code>tomllib</code>（3.11+）；环境没有它就自动退回内嵌 sample 配置。</p>
+<h2 id="小结">小结</h2>
+<ul><li>配置来自多个来源，用一条<strong>显式优先级链</strong>合成：DEFAULTS → config.toml → profile → 运行时覆盖，<strong>后层覆盖前层（last-wins）</strong>，靠 deep-merge 逐层叠加。</li><li><strong>命名 profile</strong>把「一整套自主度配置」打包成一个名字——<code>safe</code>（要审批 + 工作区写）/ <code>yolo</code>（不审批 + 全权限）一秒切换。</li><li>真 Codex 的层栈更厚：<strong>system / 企业 MDM → cloud → user(config.toml + profile) → project → session flags</strong>；<code>ConfigProfile</code> 能打包十几个字段；<code>mcp_servers</code>、<code>approval</code>、<code>sandbox</code>、<code>model</code> 全都汇进同一个 <code>ConfigToml</code>。</li><li>运行时改配置是一条 <code>Op::ThreadSettings</code>（接 <a href="../s10_sq_eq_protocol/index.html">s10</a>），落在层栈最高处、不用重启。</li><li><strong>生产级</strong>：配置是安全档位的总开关，必须在 load 边界上严格校验——<code>deny_unknown_fields</code>（拼错字段直接报错）+ typed enum（非法枚举值反序列化失败），坏配置当场拒，绝不默默生效（见「生产级」一节）。</li><li>下一站 <a href="../s17_comprehensive/index.html">s17</a>：把前 16 章的机制拼成一个完整的迷你 Codex。</li></ul>
+<h2 id="思考">思考</h2>
+<ol><li>教学版「后层覆盖前层」简单明了。但真版里企业 MDM 层是<strong>最低</strong>优先级之一却又「用户不能覆盖」——这两件事看似矛盾，Codex 是怎么做到「企业策略既参与合并、又不被用户推翻」的？如果让你设计，约束（不可覆盖）和默认值（可覆盖）该不该用同一套分层机制表达？</li></ol>
+<ol><li>profile 把 <code>approval + sandbox + model</code> 捆成一个名字，切换很爽。但「捆绑」也意味着你可能<strong>只想改沙箱、却顺手把审批也换了</strong>。<code>yolo</code> 这种「不审批 + 全权限」的预设一旦手滑用在了真实仓库……这个便利性 vs 安全性的张力，你会怎么兜底——要不要给危险 profile 加二次确认？</li></ol>
+<ol><li>本章把 TOML 优先用 <code>tomllib</code>、退回内嵌 dict，是为了零依赖。可真版的 config 子系统庞大到 <code>config_requirements.rs</code> 有 12 万行——一个「读配置」的事为什么会膨胀成这样？当配置要支持「企业下发 + 云同步 + 运行时改写 + 严格校验」时，复杂度都花在了哪？</li></ol>
+<ol><li>Claude Code 用 <code>settings.json</code>、Codex 用 <code>config.toml</code> + 分层 + profile。同样是「让用户配置 agent」，一个偏轻量、一个偏体系化——这差异多大程度上是「JSON vs TOML」的口味问题，多大程度上是「单一交互前端 vs headless/CI/云多前端」逼出来的必然？换成你做一个面向 CI 的 agent，会怎么设计配置系统？</li></ol>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

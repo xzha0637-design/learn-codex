@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.DS_Store
+# 各章 --demo 产生的临时工作区
+**/sandbox_demo/
+**/_demo_workspace/
+mock_demo.txt

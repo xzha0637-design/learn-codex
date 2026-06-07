@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>超长篇：Claude Code 与 Codex 的「上下文处理」全解</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="超长篇claude-code-与-codex-的上下文处理全解">超长篇：Claude Code 与 Codex 的「上下文处理」全解</h1>
+<blockquote>这是一篇深入长文，面向<strong>只有些许基础</strong>的读者。我们从&quot;上下文窗口是什么&quot;讲起，一路拆到两套系统在 注入、压缩、截断、持久化、记忆上的每一处工程取舍，并解释<strong>为什么</strong>它们走了不同的路。 事实依据：Codex 来自本仓库的真源码 <code>../../codex/codex-rs</code>；Claude Code（下称 CC）来自 <a href="../../learn-claude-code/index.html">learn-claude-code</a> 对其源码（<code>compact.ts</code> / <code>autoCompact.ts</code> / <code>microCompact.ts</code> / <code>query.ts</code>）的剖析。 ⚠️ <strong>关于论据强度</strong>：Codex 侧每个数字/常量都能在 <code>codex-rs</code> 里查到行号；CC 侧的精确数字（如「保头几条」「N×K token 预算」「消息类型种数」「轮询 1s/500ms」）转述自 learn-claude-code 对<strong>闭源</strong> CC 的剖析，<strong>无法在本仓库独立核验</strong>——请按二手材料对待，确定性低于 Codex 侧。</blockquote>
+<p><a href="../index.html">← 返回 learn-codex 总览</a></p>
+<hr>
+<h2 id="0-给初学者上下文窗口是什么为什么会满">0. 给初学者：上下文窗口是什么，为什么会&quot;满&quot;</h2>
+<p>大模型不是数据库，它没有&quot;记忆&quot;。它每次回答，靠的都是你<strong>这一次</strong>塞给它的全部文字。</p>
+<p>这&quot;全部文字&quot;装在一个有大小上限的盒子里，叫<strong>上下文窗口（context window）</strong>，单位是 <strong>token</strong>（你可以粗略理解为&quot;词的碎片&quot;，1 个汉字大约 1–2 token，100 个英文单词大约 130 token）。比如某模型的窗口是 272,000 token——这就是它一次能&quot;看见&quot;的全部。</p>
+<p>现在想象一个 agent 在干活：</p>
+<ol><li>你说&quot;帮我把这个项目的测试修好&quot;。</li><li>它读了一个 1000 行的文件（≈4000 token）。</li><li>又读了 30 个文件、跑了 20 条命令。</li><li>每个文件的内容、每条命令的输出，<strong>全都堆在对话历史里</strong>，因为下一轮还要把整段历史重新发给模型——这是 <a href="../index.html">agent loop</a> 的本质：模型没有记忆，历史就是它的记忆。</li></ol>
+<p>堆着堆着，盒子满了。模型 API 直接报错：CC 那边叫 <code>prompt_too_long</code>（HTTP 413），Codex 那边叫 <code>ContextWindowExceeded</code>。</p>
+<p><strong>于是每一个严肃的 agent harness 都必须解决同一个问题：上下文总会满，得有办法腾地方，还不能把重要的事忘掉。</strong> 这篇文章就是讲 CC 和 Codex 各自怎么解决它——以及它们为什么解得不一样。</p>
+<hr>
+<h2 id="1-先解剖一次请求的上下文里到底装了什么">1. 先解剖：一次请求的上下文里到底装了什么</h2>
+<p>在压缩之前，先看清&quot;要压的东西&quot;由几块组成。两套系统的构成大同小异，但叫法和形状不同：</p>
+<table><thead><tr><th>组成部分</th><th>Claude Code</th><th>Codex</th><th>在哪一章细讲</th></tr></thead><tbody><tr><td>系统指令</td><td><code>system</code> 参数</td><td><code>instructions</code> 参数</td><td><a href="../s09_responses_api/index.html">s09 Responses API</a></td></tr><tr><td>项目记忆</td><td><code>CLAUDE.md</code></td><td><code>AGENTS.md</code>（逐级向上）</td><td><a href="../s06_agents_md/index.html">s06 AGENTS.md</a></td></tr><tr><td>工具定义</td><td><code>tools</code>（<code>input_schema</code>）</td><td><code>tools</code>（扁平 <code>parameters</code>）</td><td><a href="../s02_tool_use/index.html">s02</a> / <a href="../s09_responses_api/index.html">s09</a></td></tr><tr><td>对话历史</td><td><code>messages[]</code>，内容是 <code>tool_use</code>/<code>tool_result</code> <strong>块</strong></td><td>扁平 item 列表：<code>message</code>/<code>function_call</code>/<code>function_call_output</code></td><td><a href="../s09_responses_api/index.html">s09</a> / <a href="../s10_sq_eq_protocol/index.html">s10</a></td></tr><tr><td>模型推理</td><td>thinking 块</td><td>reasoning item（可加密、跨轮携带）</td><td><a href="../s09_responses_api/index.html">s09</a></td></tr><tr><td>工具输出</td><td><code>tool_result</code> 块的内容</td><td><code>function_call_output</code> 的内容</td><td><a href="../s07_context_compaction/index.html">s07 压缩</a></td></tr></tbody></table>
+<p><strong>关键认知</strong>：上面除了&quot;系统指令/项目记忆/工具定义&quot;是相对固定的，<strong>对话历史 + 工具输出</strong>才是会无限膨胀、最终撑爆窗口的部分。所以一切压缩手段，主要都在跟这两块较劲。</p>
+<p>下面我们顺着&quot;注入 → 表示 → 压缩 → 截断 → 持久化 → 记忆&quot;这条链，逐段对比。</p>
+<hr>
+<h2 id="2-注入项目记忆claudemdcc-vs-agentsmdcodex">2. 注入项目记忆：CLAUDE.md（CC） vs AGENTS.md（Codex）</h2>
+<p>agent 要懂&quot;这个项目的规矩&quot;（用什么包管理器、代码风格、别碰哪些目录）。两边都用一个 Markdown 文件承载这种&quot;项目记忆&quot;，但发现与注入的方式不同。</p>
+<h3 id="codex逐级向上收集-agentsmd有上限可覆盖">Codex：逐级向上收集 AGENTS.md，有上限、可覆盖</h3>
+<p>真源码在 <a href="../../codex/codex-rs/core/src/agents_md.rs"><code>core/src/agents_md.rs</code></a>。要点：</p>
+<ul><li><strong>从当前目录一路向上走到项目根</strong>（<code>.git</code> 等标记），把沿途每一个 <code>AGENTS.md</code> 都收集起来；</li><li>用分隔符 <code>AGENTS_MD_SEPARATOR = &quot;\n\n--- project-doc ---\n\n&quot;</code> 把它们<strong>按&quot;根 → 当前目录&quot;的顺序</strong>拼接（越具体的越靠后，越&quot;近&quot;越有发言权）；</li><li>有总量上限 <code>project_doc_max_bytes</code>（默认约 32 KiB）——记忆不能无限大，否则它自己就先把窗口吃掉了；</li><li>支持本地覆盖文件 <code>AGENTS.override.md</code>（<code>LOCAL_AGENTS_MD_FILENAME</code>），以及可配置的回退文件名 <code>project_doc_fallback_filenames</code>；</li><li>最终作为一个 <code>&lt;user_instructions&gt;</code> 块注入到 <code>instructions</code> 里。</li></ul>
+<p>这套&quot;逐级向上 + 拼接&quot;的设计特别适合 <strong>monorepo</strong>：仓库根放通用规矩，每个子包放自己的特殊规矩，agent 进到哪个子目录，就自动叠加那一路的规矩。</p>
+<h3 id="claude-codeclaudemd">Claude Code：CLAUDE.md</h3>
+<p>CC 用 <code>CLAUDE.md</code> 承载同样的角色（项目级、用户级），注入进 system。它同样支持层级（项目/用户/本地），理念一致。</p>
+<h3 id="差异与为什么">差异与为什么</h3>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>文件名</td><td><code>CLAUDE.md</code></td><td><code>AGENTS.md</code>（+ <code>AGENTS.override.md</code>）</td></tr><tr><td>发现方式</td><td>项目/用户层级</td><td><strong>从 cwd 逐级向上收集整条链</strong></td></tr><tr><td>大小约束</td><td>有</td><td>显式字节上限（默认 ~32KiB）</td></tr><tr><td>标准化</td><td>自家约定</td><td>推动 <code>AGENTS.md</code> 成为<strong>跨工具/跨厂商</strong>的开放约定</td></tr></tbody></table>
+<p><strong>为什么？</strong> AGENTS.md 是 OpenAI 主推的一个跨工具标准——它希望同一份 <code>AGENTS.md</code> 能被 Codex、以及其它遵循该约定的工具共用。逐级向上收集则是把&quot;项目记忆&quot;做成可分层叠加的，契合大仓库。两者哲学一致（给 agent 注入项目常识），差别在标准化姿态与发现粒度。</p>
+<hr>
+<h2 id="3-历史的形状如何影响压缩">3. 历史的&quot;形状&quot;如何影响压缩</h2>
+<p>这一点常被忽略，但很关键：<strong>历史长什么样，决定了你能怎么压它。</strong></p>
+<ul><li><strong>CC（Anthropic Messages）</strong>：历史是 <code>messages[]</code>，每条消息的 <code>content</code> 是一个<strong>块数组</strong>，工具调用是 <code>tool_use</code> 块、工具结果是 <code>tool_result</code> 块，<strong>嵌在</strong> assistant/user 消息里。所以 CC 的压缩是&quot;在消息和块两个层级上动手&quot;——既能裁整条消息，也能单独把某个 <code>tool_result</code> 块的内容替换掉。</li><li><strong>Codex（OpenAI Responses）</strong>：历史是<strong>扁平的 item 列表</strong>，<code>function_call</code> 和 <code>function_call_output</code> 各自是<strong>独立的 item</strong>，与文本 <code>message</code> 平级。所以 Codex 更多是&quot;在 item 序列上从头裁剪&quot;。</li></ul>
+<p>记住这个形状差异，下面两节的压缩策略就好理解了。</p>
+<hr>
+<h2 id="4-claude-code-的压缩四层流水线便宜的先跑">4. Claude Code 的压缩：四层流水线，便宜的先跑</h2>
+<p>CC 的核心设计原则是 <strong>&quot;便宜的先跑，贵的后跑&quot;</strong>——能用纯文本操作解决的，绝不调模型。它把压缩做成一条四层流水线（外加应急层），每轮 LLM 调用前依次跑。</p>
+<h3 id="l1-snip_compact-裁掉中间无关的旧对话0-api">L1 · snip_compact —— 裁掉中间无关的旧对话（0 API）</h3>
+<p>对话攒到很多条时，最前面那些&quot;帮我建个 hello.py&quot;早跟当前工作无关了。保留<strong>头部 3 条</strong>（初始上下文）+ <strong>尾部若干条</strong>（当前工作），中间用一句占位符 <code>[snipped N messages]</code> 替掉。</p>
+<blockquote>真实 CC 里这是个 feature gate（<code>HISTORY_SNIP</code>），还暴露了 <code>SnipTool</code> 让模型主动调用。</blockquote>
+<h3 id="l2-micro_compact-旧工具结果替换成占位符0-api">L2 · micro_compact —— 旧工具结果替换成占位符（0 API）</h3>
+<p>连续读了 10 个文件，前 7 个的完整内容还躺在上下文里白占地方。只保留<strong>最近 3 条</strong> <code>tool_result</code> 的完整内容，更旧的替换成 <code>[Earlier tool result compacted. Re-run if needed.]</code>。</p>
+<blockquote>真实 CC 有两条路径：按时间触发（间隔 60 分钟）直接清，和走 API <code>cache_edits</code> 的缓存路径。</blockquote>
+<h3 id="l3-tool_result_budget-大结果落盘0-api">L3 · tool_result_budget —— 大结果落盘（0 API）</h3>
+<p>一次 <code>cat</code> 了 5 个大文件，单条消息里的 <code>tool_result</code> 加起来 500KB。统计最后一条 user 消息里所有 <code>tool_result</code> 总大小，超过 <strong>200,000 字符</strong>就从最大的开始<strong>落盘</strong>到 <code>.task_outputs/</code>，上下文里只留一个 <code>&lt;persisted-output&gt;</code> 标记 + 前 2000 字符预览。模型知道完整内容在磁盘上，需要时重新读。</p>
+<h3 id="l4-compact_history-llm-全量摘要1-api">L4 · compact_history —— LLM 全量摘要（1 API）</h3>
+<p>前三层都是纯文本操作、不&quot;理解&quot;内容。如果 token 仍超阈值，就把整段历史发给模型，要求它生成结构化摘要（真实 CC 要求 <strong>9 个部分</strong> + <code>&lt;analysis&gt;</code>/<code>&lt;summary&gt;</code> 双标签，并在首尾<strong>双重强调禁止调用工具</strong>），然后用这条摘要<strong>替换</strong>掉旧消息。</p>
+<ul><li>触发阈值（精确 token）：<code>contextWindow − maxOutputTokens − 13,000</code>（那 13,000 是 <code>AUTOCOMPACT_BUFFER_TOKENS</code> 安全余量）。</li><li><strong>压缩后恢复</strong>：CC 不只留摘要——它会自动重新附加最近读过的文件（最多 <strong>5 个</strong>、每个 <strong>5,000</strong> token、总预算 <strong>50,000</strong> token）、计划、agent/skill/tool 上下文。这是教学版没有的生产级细节。</li><li><strong>熔断器</strong>：连续摘要失败 3 次就停，防止死循环烧钱。</li></ul>
+<h3 id="应急-reactive_compact-真撞上-413-时">应急 · reactive_compact —— 真撞上 413 时</h3>
+<p>上下文涨得比压缩还快、API 直接返回 <code>prompt_too_long</code> 时，触发更激进的回退：按消息组从尾部回退（<code>truncateHeadForPTLRetry</code>），字节级裁到 API 能接受，只留摘要 + 最后几条。有重试上限，超了就抛错（错误恢复属于另一个话题）。</p>
+<h3 id="还有两个机制">还有两个机制</h3>
+<ul><li><strong>contextCollapse</strong>：一套独立的上下文管理系统，启用时会抑制主动 autocompact。</li><li><strong>sessionMemoryCompact</strong>：在调 LLM 摘要前，先尝试用已有的&quot;会话记忆&quot;（见第 10 节）做轻量摘要，省一次 API。</li></ul>
+<p><strong>一句话总结 CC 的风格</strong>：客户端全包、分层精细、便宜优先、压缩后努力把&quot;最近最相关&quot;的东西捞回来。</p>
+<hr>
+<h2 id="5-codex-的压缩保前缀缓存-可以把活儿甩给服务端">5. Codex 的压缩：保前缀缓存 + 可以把活儿甩给服务端</h2>
+<p>Codex 的压缩在 <a href="../../codex/codex-rs/core/src/compact.rs"><code>core/src/compact.rs</code></a>，核心是 <code>run_inline_auto_compact_task</code> 与 <code>build_compacted_history</code>。它和 CC 同样有&quot;主动阈值触发&quot;和&quot;撞墙反应式触发&quot;，但有两处鲜明不同。</p>
+<h3 id="不同点一从头部裁剪刻意保住前缀缓存">不同点一：从<strong>头部</strong>裁剪，刻意保住&quot;前缀缓存&quot;</h3>
+<p><code>compact.rs</code> 里有一句点睛注释：</p>
+<blockquote><em>&quot;Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.&quot;</em></blockquote>
+<p>意思是：大模型 API 的 <strong>prompt 缓存是基于前缀的</strong>——只要这次请求的开头和上次一样，那部分就能命中缓存、又快又便宜。所以 Codex 压缩时倾向于<strong>保持前缀稳定、从历史中段/前段裁</strong>，并保留最近消息完整。摘要文本带固定前缀 <code>SUMMARY_PREFIX</code>（用 <code>is_summary</code> 之类判断一条消息是不是摘要），摘要本身上限 <code>COMPACT_USER_MESSAGE_MAX_TOKENS = 20,000</code> token。</p>
+<p>压缩完还会 <code>recompute_token_usage</code> 重新核账，并给用户一句温馨提示：</p>
+<blockquote><em>&quot;Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible...&quot;</em></blockquote>
+<p>——Codex 明确承认&quot;压缩有损&quot;，并建议你<strong>开新线程</strong>。这条产品态度本身就是一种取舍。</p>
+<h3 id="不同点二服务端远程压缩cc-没有的东西">不同点二：<strong>服务端远程压缩</strong>（CC 没有的东西）</h3>
+<p>Codex 有 <a href="../../codex/codex-rs/core/src/compact_remote.rs"><code>compact_remote.rs</code></a> 和 <code>compact_remote_v2.rs</code>：<code>run_inline_remote_auto_compact_task</code>、<code>trim_function_call_history_to_fit_context_window</code>。也就是说，<strong>压缩这件事可以发生在服务端</strong>，而不只是客户端本地。</p>
+<p>为什么 Codex 能这么做、CC（基本）不这么做？因为协议不同（见 <a href="../s09_responses_api/index.html">s09 Responses API</a>、<a href="../s10_sq_eq_protocol/index.html">s10 SQ/EQ</a>）：</p>
+<ul><li>Codex 走 <strong>Responses API</strong>，带服务端会话状态、<code>x-codex-turn-state</code> 粘性路由——服务端&quot;知道&quot;这个线程的历史，自然可以在服务端帮你压。</li><li>CC 走 <strong>Messages API</strong>，基本是无状态的：每次把完整 <code>messages[]</code> 发过去。状态在客户端，压缩也就只能在客户端做。</li></ul>
+<p>模型信息里甚至直接带着压缩相关字段（<code>client_tests.rs</code> 里能看到 <code>&quot;context_window&quot;: 272000, &quot;auto_compact_token_limit&quot;: null</code>）——窗口大小和自动压缩阈值是模型能力描述的一部分。</p>
+<h3 id="工具输出截断truncationpolicy">工具输出截断：TruncationPolicy</h3>
+<p>Codex 用 <code>codex_utils_output_truncation</code>（<code>TruncationPolicy</code>、<code>approx_token_count</code>、<code>truncate_text</code>）对<strong>单条工具输出</strong>做截断，并有 <a href="../../codex/codex-rs/core/src/thread_rollout_truncation.rs"><code>thread_rollout_truncation.rs</code></a> 处理 rollout 层的截断。对应 CC 的 L3，但 Codex 更偏&quot;按 token 策略截断 + 记录到 rollout&quot;，CC 更偏&quot;落盘留预览&quot;。</p>
+<p><strong>一句话总结 Codex 的风格</strong>：保前缀缓存、承认有损并劝你开新线程、能把压缩下沉到服务端。</p>
+<hr>
+<h2 id="6-触发时机对比">6. 触发时机对比</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>主动（proactive）</td><td>每轮前跑 L1–L3，token 超 <code>ctx−maxOut−13k</code> 触发 L4 摘要</td><td>每轮前估算，超 <code>auto_compact_token_limit</code> 触发 <code>run_inline_auto_compact_task</code></td></tr><tr><td>反应式（reactive）</td><td>撞 <code>prompt_too_long</code>(413) → <code>reactive_compact</code> 激进回退</td><td>撞 <code>ContextWindowExceeded</code> → 内联压缩重试</td></tr><tr><td>压缩位置</td><td><strong>纯客户端</strong>（4 层流水线）</td><td>客户端 <strong>或 服务端</strong>（remote v2）</td></tr><tr><td>主动求助用户</td><td><code>/compact</code> 命令、<code>SnipTool</code></td><td>提示&quot;开新线程&quot;，<code>Op::Compact</code> 手动触发</td></tr><tr><td>缓存策略</td><td>头 3 + 尾 N</td><td><strong>从头裁、保前缀缓存</strong></td></tr></tbody></table>
+<p>两边都遵循&quot;能不调模型就不调&quot;的便宜优先思路，也都有&quot;主动 + 撞墙兜底&quot;两条路径——这是趋同的工程智慧。分野在<strong>位置（客户端 vs 服务端）</strong>和<strong>缓存哲学</strong>。</p>
+<hr>
+<h2 id="7-活跃上下文-持久记录codex-的-rollout-解耦">7. 活跃上下文 ≠ 持久记录：Codex 的 Rollout 解耦</h2>
+<p>这是初学者最容易混淆、却最重要的一点：<strong>&quot;模型现在看得见的东西&quot;和&quot;系统保存下来的东西&quot;，是两回事。</strong></p>
+<ul><li><strong>Codex</strong>：<a href="../../codex/codex-rs/rollout/index.html"><code>rollout/</code></a> 把<strong>完整</strong>历史（每条 item、工具调用、错误、成本、时间）持久化到 <strong>SQLite + zstd 压缩</strong>。这份记录是<strong>全量、不丢</strong>的。压缩只发生在&quot;喂给模型的活跃上下文&quot;上——哪怕活跃上下文被摘要成一句话，rollout 里的完整原文仍在，所以你可以<strong>resume（续接）</strong>、<strong>rewind（回退 N 个回合，<code>Op::ThreadRollback</code>）</strong>、甚至重放整个会话。换句话说：<strong>压缩有损，但持久记录无损。</strong></li><li><strong>Claude Code</strong>：L4 压缩前会把完整对话写入 <code>.transcripts/</code>（JSONL）留档，但这更像&quot;留个备份&quot;，活跃会话主要还是围绕客户端的 <code>messages[]</code>。</li></ul>
+<p><strong>为什么 Codex 把这件事做得这么重？</strong> 因为它为云端/无人值守而生（<code>codex exec</code>、Codex 云端）：会话可能跑很久、跨机器、要可审计、要能从任意点恢复。把&quot;durable 全量记录&quot;和&quot;lossy 活跃上下文&quot;彻底解耦，是支撑这些场景的地基。</p>
+<hr>
+<h2 id="8-一个常被忽视的上下文成本reasoning">8. 一个常被忽视的上下文成本：reasoning</h2>
+<p>Codex 用的是<strong>推理模型</strong>，模型会产出 <code>reasoning</code>（推理过程）item。这些 reasoning：</p>
+<ul><li>会作为协议一等公民<strong>跨轮携带</strong>（甚至是加密内容），让模型&quot;记得自己之前怎么想的&quot;；</li><li>也因此<strong>占用上下文预算</strong>——推理越多，挤占的窗口越多，压缩压力越大。</li></ul>
+<p>CC 这边对应的是 thinking 块。差别在于 Codex 把 reasoning 深度整合进协议、rollout 与压缩流程（压缩时要决定 reasoning 留多少），这是&quot;推理模型 + Responses API&quot;组合带来的、CC 当前形态下没那么突出的一类上下文成本。</p>
+<hr>
+<h2 id="9-压缩会丢细节于是有了记忆层">9. 压缩会丢细节，于是有了&quot;记忆层&quot;</h2>
+<p>压缩是有损的——用户半小时前说的&quot;别用 yarn，用 pnpm&quot;，可能在某次摘要里就被冲淡了。两边都意识到要有一层&quot;不随压缩丢失&quot;的东西。</p>
+<ul><li><strong>Claude Code</strong>：有一套<strong>记忆子系统</strong>（learn-cc s09）——LLM 选择&quot;什么值得记&quot;（不是 embedding 检索），在 stop hook 时机提取，写入 Markdown 记忆文件，跨压缩、跨会话存活；还区分 User Memory / Session Memory，并有低频的合并去重（&quot;Dream&quot;四层门控）。</li><li><strong>Codex</strong>：一方面靠<strong>静态的 AGENTS.md</strong>（第 2 节）承载长期项目常识；另一方面有 <code>ext/memories</code> crate 和 <code>Op::SetThreadMemoryMode</code>——即一个可开关的<strong>线程记忆模式</strong>。再加上<strong>全量 rollout</strong>（第 7 节）本身就是&quot;什么都没真正丢&quot;的兜底。</li></ul>
+<h3 id="差异与为什么">差异与为什么</h3>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>长期项目常识</td><td>CLAUDE.md</td><td>AGENTS.md（分层）</td></tr><tr><td>跨压缩的动态记忆</td><td>主动提取的记忆子系统（选什么记、整理巩固）</td><td><code>ext/memories</code> + 线程记忆模式；更多依赖全量 rollout</td></tr><tr><td>&quot;不丢&quot;的底线</td><td>transcript 备份</td><td><strong>SQLite 全量 rollout，可 resume/rewind</strong></td></tr></tbody></table>
+<p><strong>为什么？</strong> CC 把&quot;记忆&quot;做成一个主动、精挑细选的客户端子系统，契合它&quot;本地、交互、长期陪伴一个人&quot;的定位；Codex 更倾向&quot;全量持久化 + 可恢复&quot;作为底线，把&quot;记住关键&quot;更多交给静态 AGENTS.md 和可恢复的 rollout，契合它&quot;云端、可审计、可重放&quot;的定位。</p>
+<hr>
+<h2 id="10-总对比表">10. 总对比表</h2>
+<table><thead><tr><th>维度</th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>协议状态</td><td>Messages API，<strong>结构性无状态</strong>（状态在客户端）</td><td>Responses API，<strong>服务端可有状态</strong>（Codex 对 OpenAI 默认 <code>store:false</code> 仍无状态重发，仅 Azure/远程压缩用上服务端状态；精确辨析见 <a href="api-message-vs-responses.html">API 对比</a> §5）</td></tr><tr><td>项目记忆</td><td>CLAUDE.md</td><td>AGENTS.md（逐级向上、有上限、可覆盖、跨工具标准）</td></tr><tr><td>历史形状</td><td>嵌套内容块（tool_use/tool_result）</td><td>扁平 item（function_call/_output）</td></tr><tr><td>压缩位置</td><td>纯客户端，四层流水线</td><td>客户端 <strong>+ 服务端远程压缩</strong></td></tr><tr><td>缓存哲学</td><td>头 3 + 尾 N</td><td><strong>从头裁，保前缀缓存</strong></td></tr><tr><td>压缩后恢复</td><td>主动重附最近文件/计划（5 文件×5K/50K 预算）</td><td>保最近 + 摘要前缀；建议开新线程</td></tr><tr><td>工具大输出</td><td>落盘 + 2000 字预览（&gt;200KB）</td><td>TruncationPolicy 按 token 截断 + rollout 截断</td></tr><tr><td>活跃上下文 vs 持久记录</td><td>transcript 备份</td><td><strong>rollout 全量解耦，可 resume/rewind</strong></td></tr><tr><td>reasoning 上下文</td><td>thinking 块</td><td>reasoning item 跨轮携带（占预算）</td></tr><tr><td>动态记忆</td><td>主动提取的记忆子系统</td><td>ext/memories + 全量 rollout 兜底</td></tr><tr><td>有损态度</td><td>努力恢复、尽量无感</td><td>明确承认有损、劝开新线程</td></tr></tbody></table>
+<hr>
+<h2 id="11-为什么不同把账算到底">11. 为什么不同？把账算到底</h2>
+<p>把上面所有差异收束成一句话：</p>
+<blockquote><strong>Codex 的上下文策略是&quot;服务端 + 持久化 + 可恢复&quot;，CC 的是&quot;客户端 + 精细流水线 + 主动恢复&quot;。</strong></blockquote>
+<p>根因有三层：</p>
+<ol><li><strong>协议决定了可能性。</strong> Responses API 让服务端持有会话状态，于是 Codex <em>能</em>把压缩甩到服务端、<em>能</em>维护可恢复的 rollout；Messages API 基本无状态，CC 的上下文管理只能、也因此做得极其精细地，全压在客户端。</li><li><strong>场景决定了优先级。</strong> Codex 为 headless / CI / 云端而生——会话长、跨机器、要审计、要能从任意点恢复，所以&quot;全量持久 + 可重放&quot;是地基，&quot;保前缀缓存&quot;是成本优化。CC 为本地交互而生——一个人一台机长期协作，所以&quot;压缩后把最相关的东西捞回来、让用户尽量无感&quot;是体验核心。</li><li><strong>模型形态带来了新成本。</strong> 推理模型让 reasoning 成为一块要管理的上下文，Codex 把它整合进协议与压缩；这是它与&quot;经典对话历史&quot;管理不同的一笔账。</li></ol>
+<p>没有谁更高明——这是两套面向不同世界的、自洽的工程答案。理解了&quot;账是怎么算的&quot;，你就能在自己的 harness 里做出<strong>属于你的场景</strong>的取舍。</p>
+<hr>
+<h2 id="12-思考">12. 思考</h2>
+<div class="think">
+<ol><li>&quot;压缩有损但 rollout 无损&quot;——如果让你设计，你会让模型<strong>知道</strong>自己被压缩过吗？知道了它会不会主动说&quot;我需要重读那个文件&quot;？这是好事还是会变啰嗦？</li><li>Codex 为了保前缀缓存而&quot;从头裁&quot;，CC 为了留初始上下文而&quot;保头 3&quot;。这两种策略在一个&quot;开头有重要约束、中间是一堆探索&quot;的长会话里，谁会先把约束弄丢？</li><li>服务端压缩省了客户端的活，但也意味着&quot;你的对话在服务端被一个你看不见的过程改写了&quot;。在可审计性上，这是加分还是减分？</li><li>如果上下文窗口某天变成 1 亿 token，&quot;压缩&quot;这件事会消失吗？还是只是阈值变了、账本不变？（提示：想想成本、延迟、和&quot;大海捞针&quot;的注意力问题。）</li><li>CC 用一个 LLM 主动&quot;挑什么值得记&quot;，Codex 更靠&quot;全量存着、要用再捞&quot;。哪种更像人类的记忆？哪种更适合 agent？</li></ol>
+</div>
+<hr>
+<p><a href="../index.html">← 返回 learn-codex 总览</a> · 相关章节：<a href="../s06_agents_md/index.html">s06 AGENTS.md</a> · <a href="../s07_context_compaction/index.html">s07 上下文压缩</a> · <a href="../s08_rollout/index.html">s08 Rollout</a> · <a href="../s09_responses_api/index.html">s09 Responses API</a> · <a href="../s10_sq_eq_protocol/index.html">s10 SQ/EQ</a></p>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

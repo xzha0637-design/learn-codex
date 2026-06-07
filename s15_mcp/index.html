@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s15: MCP — 客户端 + 服务端：能力不够就插，也能被别人插</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s15-mcp-客户端-服务端能力不够就插也能被别人插">s15: MCP — 客户端 + 服务端：能力不够就插，也能被别人插</h1>
+<blockquote><em>&quot;MCP 是 agent 世界的标准插座：任何工具都能插进任何 agent，任何 agent 也能反过来插进别的 agent。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s14_guardian/index.html">Guardian</a> → <strong>本章</strong> → <a href="../s16_config/index.html">Config 与 Profiles</a></p>
+<hr>
+<h2 id="先把思想说透为什么需要一个标准插座以及它最妙的一点">先把思想说透：为什么需要一个「标准插座」，以及它最妙的一点</h2>
+<p>到这一章为止，你的 agent 手里的工具都是<strong>写死在自己代码里</strong>的：<code>shell</code>、<code>apply_patch</code>……想加一个新能力，就得改 agent 的源码。这一章要讲的 MCP，本质上只想解决一句话的问题：<strong>怎么让 agent 和工具，像电器和插座那样即插即用？</strong> 想通下面三个递进的道理，这一章就通了。</p>
+<p><strong>道理一：没有标准，就是 N×M 份胶水代码。</strong> 设想你有 3 个 agent（Codex、Claude Code、你自己写的脚本），和 5 个外部能力（查 GitHub issue、跑 SQL、画图、查天气、读公司知识库）。如果每个 agent 都要为每个能力<strong>单独写一段对接代码</strong>——定义工具 schema、塞进工具表、写 handler、处理鉴权——那就是 3×5 = 15 份互不复用的胶水。再加一个 agent 或一个能力，就要再写一整列、一整行。这正是&quot;没有标准接口&quot;的世界：每个组合都得重新焊一次线。</p>
+<p><strong>道理二：定一个标准的「插头形状」，N×M 就塌缩成 N+M。</strong> 解法和 USB-C 一模一样：<strong>约定一套谁都遵守的接口</strong>。能力方实现一次&quot;标准插头&quot;（一个 MCP <strong>server</strong>），agent 方实现一次&quot;标准插座&quot;（一个 MCP <strong>client</strong>），两边讲同一套 JSON-RPC 对话——无非就是几个固定的&quot;问句&quot;：<code>initialize</code>（握手）、<code>tools/list</code>（你有哪些工具？）、<code>tools/call</code>（帮我调一下这个工具）。于是任何 client 都能接任何 server：5 个能力各做一次 server，3 个 agent 各做一次 client，一共只要 3+5 = 8 份代码，且任意新组合<strong>零额外成本</strong>。&quot;标准&quot;的全部威力，就是把乘法变成加法。</p>
+<p><strong>道理三（本章的灵魂）：插座和插头，可以是同一个东西——这就是双向性。</strong> 前两点你可能在别处也听过。MCP 真正深刻、也最容易被忽略的一点是：<strong>一个 agent 不必只当&quot;用工具的人&quot;，它可以反过来把自己整个变成&quot;一个工具&quot;，被别的 agent 调用。</strong> Codex 既是 client（去用别人的 echo / SQL / 画图工具），又能当 server——把&quot;跑一整个 Codex 编码任务&quot;暴露成一个叫 <code>codex</code> 的工具，让别的 agent（甚至 Claude Code、甚至 CI 流水线）像调函数一样调它：&quot;喂，帮我把这个模块的测试补全并跑通。&quot;</p>
+<p>为什么这一点这么关键？因为它直接决定了 agent 能不能<strong>互相编排、堆成一个系统</strong>。如果 agent 只能当 client，那它永远是&quot;金字塔顶端、面向人&quot;的那一个；可一旦它也能当 server，agent 之间就能<strong>互相调用</strong>：上层负责拆任务，把脏活外包给下层；多个 Codex 可以并行被一个编排器调起来批量干活。打个比方——会用工具的，是个<strong>能干的工人</strong>；能被别人当工具调用的，是一个<strong>可以被随时雇佣、塞进任何流水线的工种</strong>。Codex 两头都站，这正是它&quot;为无人值守、可被程序编排而生&quot;的最直接体现。</p>
+<p>这一章就把这两半合在一起讲：先看 Codex 当 client（用别人的工具），再看 Codex 当 server（被别人当工具）。同一套 JSON-RPC，两个方向。</p>
+<h2 id="问题">问题</h2>
+<p>具体感受一下两个方向各自的痛点。</p>
+<p><strong>方向 A 的痛点（该用别人的工具时）：</strong> 你让 Codex&quot;看看仓库里有哪些未关闭的 GitHub issue，挑一个修了&quot;。可 Codex 内置工具里根本没有&quot;查 GitHub&quot;这一项。难道要给 Codex 的源码里硬塞一段 GitHub API 对接？那明天你想接 Jira、后天想接公司内部的工单系统，是不是还得各改一遍源码？<strong>能力散落在世界各处，而 agent 的工具表是写死的——这中间缺一座即插即用的桥。</strong></p>
+<p><strong>方向 B 的痛点（该被别人调用时）：</strong> 反过来，Claude Code 正帮你重构一个大仓库，遇到一段它不熟的代码，想&quot;外包&quot;给 Codex 跑一个独立子任务。或者你的 CI 流水线想在某一步直接喊一句&quot;让 Codex 修掉这个 lint 错误&quot;。可如果 Codex 只会当一个<strong>面向人的 CLI/TUI</strong>，这些场景就接不上——你总得有个活人坐在终端前敲命令。<strong>要让 Codex 能被程序驱动、被别的 agent 当成一个可调用的能力，它就得反过来当 server。</strong></p>
+<p>两个痛点，其实是同一枚硬币的两面：<strong>agent 与外界之间，需要一套双向的、标准的接口。</strong> 这就是 MCP。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>MCP（Model Context Protocol）把&quot;agent ↔ 工具&quot;标准化成一套 JSON-RPC 对话。本章用一个<strong>完全离线</strong>的进程内实现，把两个方向都演示出来。</p>
+<p><strong>方向 A（client）：</strong> 中间放一个<strong>连接管理器</strong>。它持有若干 server 连接，聚合各家的工具清单，把工具名<strong>加前缀命名空间化</strong>成 <code>mcp__&lt;server&gt;__&lt;tool&gt;</code>（防止两个 server 都叫 <code>search</code> 时撞名），交给模型。模型发起调用时，按前缀把它<strong>路由</strong>回正确的 server。</p>
+<p><strong>方向 B（server）：</strong> Codex 自己实现一个 <code>handle(request)</code>，对外暴露工具。最关键的工具叫 <strong><code>codex</code></strong>：调用它、传一个自然语言 <code>prompt</code>，Codex 就<strong>启动一整个回合循环</strong>把任务跑完，再把结果作为 <code>tools/call</code> 响应送回去。</p>
+<pre><code>   ┌─────────── 方向 A：Codex 当 client ───────────┐    ┌──── 方向 B：Codex 当 server ────┐
+   │                                               │    │                                 │
+   │  回合循环 ──mcp__demo__echo──┐                  │    │   别的 agent / CI / 脚本         │
+   │     ▲                       ▼                  │    │        │ tools/call             │
+   │     │结果回灌   ┌────────────────────┐         │    │        │  name=&quot;codex&quot;          │
+   │     └──────────┤ McpConnectionMgr   │         │    │        ▼  prompt=&quot;修好这个 bug&quot; │
+   │                │ ·add_server/init    │ JSON-RPC│    │   ┌────────────────────────┐   │
+   │                │ ·list_all_tools     │◀───────▶│    │   │ CodexMcpServer.handle() │   │
+   │                │ ·call_tool(srv,tool)│  (真版  │    │   │  initialize             │   │
+   │                └────────────────────┘  走 stdio│    │   │  tools/list→[shell,codex]│  │
+   │                         ▲                │      │    │   │  tools/call ─┬ shell     │   │
+   │   ┌─────────────────────┴──────────┐    │      │    │   │              └ codex →    │   │
+   │   │ FakeMcpServer（别人家的工具）    │    │      │    │   │     run_task() = s01 循环 │   │
+   │   │  echo / add                     │    │      │    │   └────────────────────────┘   │
+   │   └─────────────────────────────────┘   │      │    │        │ result.content         │
+   └─────────────────────────────────────────┘      │    │        ▼ 回到调用方             │
+                                                     │    └─────────────────────────────────┘
+   两个方向同源：都是 initialize / tools/list / tools/call 这套 JSON-RPC，只是谁问、谁答互换。</code></pre>
+<p>为了离线、零依赖，本章两侧都把 stdio 传输层抽掉，换成<strong>进程内的方法调用</strong>：<code>handle(request_dict) -&gt; response_dict</code>。真 Codex 是把每个 server 当<strong>子进程</strong>、用 JSON-RPC over stdio 通信——但请求/响应的 dict 形状是一致的，换掉的只是&quot;传输层&quot;那一层皮。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>。它把两个方向放进<strong>同一个文件</strong>，共享同一套 JSON-RPC 形状和同一个 s01 回合循环。</p>
+<h3 id="方向-acodex-当-client用别人的工具">方向 A：Codex 当 client（用别人的工具）</h3>
+<p><strong>第 1 步 — 进程内 server 替身。</strong> <code>FakeMcpServer.handle()</code> 按 JSON-RPC 的 <code>method</code> 分派，暴露 <code>echo</code> / <code>add</code> 两个工具：</p>
+<pre><code class="language-python">def handle(self, request: dict) -&gt; dict:
+    rid, method, params = request.get(&quot;id&quot;), request.get(&quot;method&quot;), request.get(&quot;params&quot;, {}) or {}
+    if method == &quot;initialize&quot;:
+        return self._ok(rid, {&quot;protocolVersion&quot;: &quot;2025-06-18&quot;, ...})
+    if method == &quot;tools/list&quot;:
+        return self._ok(rid, {&quot;tools&quot;: self._tools})
+    if method == &quot;tools/call&quot;:
+        return self._call_tool(rid, params.get(&quot;name&quot;, &quot;&quot;), params.get(&quot;arguments&quot;, {}) or {})</code></pre>
+<p><strong>第 2 步 — 连接 + 聚合 + 命名空间化。</strong> <code>McpConnectionManager.add_server()</code> 先发 <code>initialize</code> 握手；<code>list_all_tools()</code> 把每个 server 的工具名改写成 <code>mcp__&lt;server&gt;__&lt;tool&gt;</code>，并把 MCP 的 <code>inputSchema</code> 字段转成 Responses API 工具用的 <code>parameters</code>：</p>
+<pre><code class="language-python">out.append({
+    &quot;name&quot;: f&quot;{MCP_PREFIX}{name}{MCP_DELIM}{t[&#x27;name&#x27;]}&quot;,   # mcp__demo__echo
+    &quot;description&quot;: t.get(&quot;description&quot;, &quot;&quot;),
+    &quot;parameters&quot;: t.get(&quot;inputSchema&quot;, {...}),             # MCP 叫 inputSchema
+})</code></pre>
+<p>这对齐真源码 <a href="../../codex/codex-rs/codex-mcp/src/connection_manager.rs"><code>connection_manager.rs</code></a> 的 <code>list_all_tools()</code> → <code>normalize_tools_for_model_with_prefix</code>，前缀常量 <code>mcp__</code>、分隔符 <code>__</code> 来自 <a href="../../codex/codex-rs/codex-mcp/src/tools.rs"><code>tools.rs:28/260</code></a>。</p>
+<p><strong>第 3 步 — 路由调用。</strong> 回合循环（<strong>从 s01 原样搬运</strong>）里，工具分派从&quot;查 HANDLERS 字典&quot;换成 <code>dispatch()</code>：凡是 <code>mcp__</code> 前缀，就拆出 <code>(server, tool)</code> 交给 <code>manager.call_tool()</code>，再把返回的 <code>content</code> 块拼成纯文本回灌模型。</p>
+<pre><code class="language-python">def dispatch(name, arguments):
+    server, tool = split_mcp_tool_name(name)        # mcp__demo__echo → (&quot;demo&quot;,&quot;echo&quot;)
+    return manager.call_tool(server, tool, arguments)</code></pre>
+<h3 id="方向-bcodex-当-server被别人当工具">方向 B：Codex 当 server（被别人当工具）</h3>
+<p>核心是一个 <code>CodexMcpServer.handle()</code>，对齐真源码 <a href="../../codex/codex-rs/mcp-server/src/message_processor.rs"><code>message_processor.rs</code></a> 的 <code>process_request</code>：同样按 <code>method</code> 分派到 <code>initialize</code> / <code>tools/list</code> / <code>tools/call</code>，未知 method 同样回 <code>-32601 method not found</code>。<code>initialize</code> 宣告&quot;支持 tools / toolListChanged&quot;——对齐真 <code>handle_initialize</code> 里的 <code>ServerCapabilities::builder().enable_tools().enable_tool_list_changed()</code>。</p>
+<p>最关键的是 <code>tools/call</code> 里的 <strong><code>codex</code> 工具 = 跑一整个 Codex 任务</strong>。<code>run_task()</code> 就是 <strong>s01 的回合循环</strong>再搬一次：把 prompt 当第一条用户消息，模型循环调用 <code>shell</code> 直到说完，返回最终文本：</p>
+<pre><code class="language-python">def _call_tool(self, rid, name, args):
+    if name == &quot;shell&quot;:
+        return self._tool_result(rid, run_shell(args[&quot;command&quot;]))
+    if name == &quot;codex&quot;:
+        return self._tool_result(rid, run_task(args[&quot;prompt&quot;]))   # ← 跑一整个任务</code></pre>
+<p>这正是真 server 干的事，只是真版更重：<code>handle_tool_call_codex</code>（<code>message_processor.rs:346</code>）解析参数、<code>spawn</code> 一个异步任务、调用 <a href="../../codex/codex-rs/mcp-server/src/codex_tool_runner.rs"><code>run_codex_tool_session</code></a>，后者通过 <code>Op::UserInput</code> 把 prompt 提交进一个<strong>完整的</strong> Codex thread。</p>
+<h3 id="走一遍方向-b-的-codex-工具一次调用里数据怎么流动"><strong>走一遍</strong>：方向 B 的 <code>codex</code> 工具，一次调用里数据怎么流动</h3>
+<p>最值得走一遍的，是&quot;别的 agent 把整个 Codex 当一次工具调用&quot;这件事——因为它把本章两个方向、和前面所有章都串了起来。假设 CI 流水线发来这样一条 JSON-RPC 请求（这就是 <code>--demo</code> 的第 4 步）：</p>
+<p><strong>① 进来的请求</strong>（一个普通的 <code>tools/call</code>，工具名是 <code>codex</code>）：</p>
+<pre><code class="language-json">{ &quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;id&quot;: 4, &quot;method&quot;: &quot;tools/call&quot;,
+  &quot;params&quot;: { &quot;name&quot;: &quot;codex&quot;, &quot;arguments&quot;: { &quot;prompt&quot;: &quot;运行 `echo built by codex`&quot; } } }</code></pre>
+<p><strong>② <code>handle()</code> 按 method 分派</strong> → <code>tools/call</code> → <code>_call_tool(name=&quot;codex&quot;, ...)</code> → 发现是 <code>codex</code>，于是调 <code>run_task(&quot;运行 </code>echo built by codex<code>&quot;)</code>。<strong>为什么这一跳是重点</strong>：从这里开始，被调的 Codex 走的就是和你平时用它<strong>一模一样</strong>的回合循环——它不知道自己是被一个 agent 调起来的，它只是在跑一个任务。</p>
+<p><strong>③ <code>run_task</code> 内部第一圈</strong>：把 prompt 当第一条 user 消息发给模型。模型（这里是离线 mock）看到工具表里有 <code>shell</code>、又从 prompt 的反引号里抠出命令，于是产出一个 <code>function_call</code>：</p>
+<pre><code class="language-json">{ &quot;type&quot;: &quot;function_call&quot;, &quot;call_id&quot;: &quot;mock_call_1&quot;,
+  &quot;name&quot;: &quot;shell&quot;, &quot;arguments&quot;: &quot;{\&quot;command\&quot;: \&quot;echo built by codex\&quot;}&quot; }</code></pre>
+<p><strong>④ 执行 + 回灌</strong>：<code>run_shell(&quot;echo built by codex&quot;)</code> 真的在子进程里跑了一下，拿到 <code>&quot;built by codex&quot;</code>，把它包成 <code>function_call_output</code> 追加回对话。</p>
+<p><strong>⑤ <code>run_task</code> 第二圈</strong>：模型再被调用，这次它看到对话里已经有工具结果了，于是不再调工具、直接收口，返回最终文本 <code>&quot;[mock] 工具已执行，结果片段：built by codex&quot;</code>。<code>run_task</code> 返回这串文本。</p>
+<p><strong>⑥ 出去的响应</strong>：<code>_tool_result</code> 把它包成标准的 MCP <code>content</code> 块送回 CI：</p>
+<pre><code class="language-json">{ &quot;jsonrpc&quot;: &quot;2.0&quot;, &quot;id&quot;: 4,
+  &quot;result&quot;: { &quot;content&quot;: [ { &quot;type&quot;: &quot;text&quot;, &quot;text&quot;: &quot;[mock] 工具已执行，结果片段：built by codex&quot; } ],
+              &quot;isError&quot;: false } }</code></pre>
+<p>看明白了吗——<strong>对 CI 来说，它只是&quot;调了一个工具、拿到一段文本&quot;</strong>，跟调 <code>echo</code> 没两样；可这一次工具调用的背后，是一整个 Codex 会话在跑回合循环、调 shell、读结果、收口。这就是&quot;agent 当工具&quot;的全部魔法：把任意复杂的自主过程，藏进一次普普通通的 <code>tools/call</code> 里。</p>
+<p><code>--demo</code> 把两个方向接连跑一遍：方向 A 打印命名空间化的工具表、直接 <code>dispatch(&quot;mcp__demo__add&quot;,{a:2,b:3})</code> 看 <code>→ 5</code>、再走一遍完整回合循环；方向 B 依次喂 <code>initialize</code> → <code>tools/list</code> → <code>tools/call(shell)</code> → <code>tools/call(codex)</code>，最后那个就是上面走的这一遍。</p>
+<h2 id="生产级mcp-server-在进程外会卡会崩会撞名">生产级：MCP server 在进程外——会卡、会崩、会撞名</h2>
+<p>MCP 最大的现实是：每个 server 是一个<strong>你管不着的独立进程</strong>（甚至在另一台机器）。它会握手失败、会调用到一半挂住、不同 server 还会暴露<strong>同名</strong>工具。玩具假设它们都乖；生产级 harness 假设它们都会出岔子。</p>
+<h3 id="一超时一个-hang-住的工具不能卡死整个-agent">一、超时：一个 hang 住的工具不能卡死整个 agent</h3>
+<p><code>tools/call</code> 走出去后，server 可能永远不返回（死循环、网络黑洞、子进程僵死）。同步等它，整个 agent 就跟着冻住。真 Codex 给每个 server 配一个 <code>tool_timeout</code>（<a href="../../codex/codex-rs/codex-mcp/src/connection_manager.rs"><code>connection_manager.rs:499</code></a>），到点就<strong>停止等待、把超时当错误回灌给模型</strong>。本章 <code>call_tool_with_timeout</code> 演示了这条：</p>
+<pre><code>② 调用超时：一个 hang 住的工具不会把 agent 永远卡死 ——
+   调用 slow/hang（超时 0.1s）：
+   → [mcp timeout] 工具 slow/hang 超过 0.1s 未返回；停止等待、丢弃这次调用，错误回灌给模型</code></pre>
+<h3 id="二连接韧性一个-server-崩了不能拖垮其余的">二、连接韧性：一个 server 崩了，不能拖垮其余的</h3>
+<p>你可能挂了 5 个 MCP server，其中一个 initialize 就崩。生产级做法是<strong>并发连接、单个失败只跳过它</strong>（真 Codex 用 <code>join_set</code> 并发拉起所有 server，<code>connection_manager.rs:302</code>；还有 <code>wait_for_server_ready(timeout)</code> 给握手也设上限）。本章 <code>add_server</code> 把握手包进 try：</p>
+<pre><code>① 连接韧性：一个 server 初始化就崩，其余照常连上 ——
+   [mcp] 跳过 &#x27;broken&#x27;：初始化失败（server crashed during initialize），其余服务器照常
+   最终可用 server：[&#x27;demo&#x27;]（broken 被跳过，没拖垮 demo）</code></pre>
+<h3 id="三撞名-太多命名空间与延迟暴露">三、撞名 + 太多：命名空间与延迟暴露</h3>
+<ul><li><strong>撞名</strong>：两个 server 都暴露一个 <code>search</code>，模型该调谁？本章早把工具名<strong>命名空间化</strong>成 <code>mcp__&lt;server&gt;__&lt;tool&gt;</code>（真 Codex 还会 <code>sanitize_name</code> 清掉非法字符，<code>codex_apps.rs</code>）——多 server 不会撞车。</li><li><strong>太多</strong>：一个 server 可能甩来几百个工具，全塞进 prompt 会撑爆上下文。这正是 <a href="../s02_tool_use/index.html">s02 的 ToolSearch / 延迟暴露</a>——MCP 工具超过阈值（<code>DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD = 100</code>）就不直接暴露、改由模型搜索发现。</li></ul>
+<h3 id="四外来工具同样受审批-沙箱约束">四、外来工具同样受审批 + 沙箱约束</h3>
+<p>MCP 工具来自<strong>第三方</strong>，更不能无条件信任。它的调用（<code>McpToolCall</code>）一样进审批门（<a href="../s04_approval/index.html">s04</a>）、被 Guardian 评风险（<a href="../s14_guardian/index.html">s14</a>）、跑命令一样在沙箱里（<a href="../s05_sandbox/index.html">s05</a>）。&quot;能插别人的工具&quot;不等于&quot;插进来就放行&quot;。</p>
+<blockquote>一句话：把别人的工具接进来，难的不是 JSON-RPC，而是<strong>假设对方会卡、会崩、会撞名、不可信</strong>，然后每一条都兜住。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th><th></th></tr></thead><tbody><tr><td>当 MCP <strong>client</strong>（用别人工具）</td><td>✅（主力）</td><td>✅</td><td>几乎一样</td></tr><tr><td>工具命名空间</td><td><code>mcp__&lt;server&gt;__&lt;tool&gt;</code></td><td><code>mcp__&lt;server&gt;__&lt;tool&gt;</code></td><td>同款历史前缀</td></tr><tr><td>传输</td><td>stdio / SSE / HTTP</td><td>stdio（rmcp）/ Streamable HTTP</td><td>大同小异</td></tr><tr><td>当 MCP <strong>server</strong>（被别人调）</td><td>基本不做</td><td>⭐ <strong>也能</strong></td><td>分野所在</td></tr><tr><td>被调的粒度</td><td>—</td><td>一次 <code>tools/call codex</code> = 跑<strong>一整个 Codex 任务</strong></td><td>agent 当工具</td></tr><tr><td>典型使用方</td><td>人坐在终端前</td><td>另一个 agent / CI 流水线 / 云端编排器</td><td>面向程序 vs 面向人</td></tr></tbody></table>
+<p><strong>为什么？</strong> 这张表上半截两边几乎<strong>一样</strong>——这恰恰是 MCP 作为&quot;开放共享标准&quot;的意义：<strong>client 这一侧是大家的公共底座</strong>，谁都该会接别人的工具，连命名空间约定都一致（<code>mcp__server__tool</code>），因为它们都要塞进同一类&quot;扁平工具名&quot;的模型 API 里。在 client 这件事上较劲没有意义，标准的价值就在于一致。</p>
+<p>真正的分野在下半截那颗 ⭐：<strong>方向性</strong>。Codex 不仅当 client，还能反过来<strong>当 server</strong>，把自己整个 agent 暴露成别人的一个工具——这就是 <strong>agents-as-tools（把 agent 当工具）</strong>。</p>
+<p>这一处差异，是全书主线&quot;<strong>Claude Code 在应用层为人而挡，Codex 在内核层为无人值守而关</strong>&quot;最直接的落点。Claude Code 把自己定位成<strong>面向人的交互式前端</strong>：它做 client，把外部能力接进来给人用；它不太需要把&quot;整个 Claude Code&quot;暴露成别人的一个函数——因为它的核心价值是那块<strong>人机交互</strong>的体验。</p>
+<p>Codex 则为&quot;<strong>低人工干预、可被编排</strong>&quot;下注。一个能当 server 的 Codex，意味着它可以被塞进 CI（某一步直接 <code>tools/call codex { prompt: &quot;修好失败的测试&quot; }</code>）、被云端编排器当成可并行调度的子代理、被另一个 agent（包括 Claude Code 自己）当成一个工具——上层负责拆解编排，把脏活外包给 Codex。换句话说：<strong>当 client 让 Codex 成为别人的消费者，当 server 让 Codex 成为别人的能力。</strong> 后者只有在你押注&quot;agent 应该能在没人盯着时被程序驱动&quot;时才划算——而这正是 Codex 一以贯之的取向（内核沙箱 <a href="../s05_sandbox/index.html">s05</a>、headless <code>codex exec</code>、SQ/EQ 多前端 <a href="../s10_sq_eq_protocol/index.html">s10</a>，全都服务于此）。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<p>教学版把两个方向各压到几十行、共一个文件，讲清了&quot;连接→命名空间→路由&quot;和&quot;分派→<code>codex</code> 工具跑整个任务&quot;。真 Codex 的两个 crate——客户端 <a href="../../codex/codex-rs/codex-mcp/index.html"><code>codex-rs/codex-mcp</code></a> 与服务端 <a href="../../codex/codex-rs/mcp-server/index.html"><code>codex-rs/mcp-server</code></a>——的复杂度，几乎全在&quot;传输并发、生命周期、命名安全、双向审批&quot;这几件事上。</p>
+<details>
+<summary>一、传输：进程内 dict 调用 vs stdio 上的子进程 / 三条 tokio 任务</summary>
+<p>教学版两侧的 <code>handle()</code> 都是普通方法调用，同步、零延迟。真 Codex 完全不同：</p>
+<p><strong>客户端侧</strong>——每个 MCP server 是一个被 spawn 出来的<strong>子进程</strong>（或一个 HTTP 端点）。Codex 用 <a href="https://crates.io/crates/rmcp">rmcp</a> 库当客户端，通过子进程的 stdin/stdout 收发 JSON-RPC，或走 <code>StreamableHttp</code>。握手是真的 <code>initialize</code>，带 <code>ClientCapabilities</code>、客户端 <code>Implementation { name: &quot;codex-mcp-client&quot;, ... }</code>，并钉死协议版本 <code>ProtocolVersion::V_2025_06_18</code>（<code>rmcp_client.rs</code>）。因为是异步 + 子进程，就有了一堆教学版没有的东西：启动超时（<code>DEFAULT_STARTUP_TIMEOUT = 30s</code>）、工具调用超时（<code>DEFAULT_TOOL_TIMEOUT = 120s</code>）、启动状态机（<code>McpStartupStatus::{Starting, Ready, Failed, Cancelled}</code>）、进程退出时 <code>shutdown()</code> 掉所有子进程。</p>
+<p><strong>服务端侧</strong>——真 server（<a href="../../codex/codex-rs/mcp-server/src/lib.rs"><code>lib.rs:run_main</code></a>）是个三任务流水线：</p>
+<pre><code>stdin ──► [stdin_reader] ──incoming_tx──► [processor] ──outgoing_tx──► [stdout_writer] ──► stdout
+          逐行解析            MessageProcessor              序列化 + 写一行 JSON
+          成 JsonRpcMessage    ::process_request</code></pre>
+<p>用 <code>tokio::spawn</code> 起三个并发任务，中间用 channel（<code>CHANNEL_CAPACITY = 128</code>）连接，最后 <code>tokio::join!</code> 一起等。之所以要拆任务：<code>tools/call codex</code> 可能跑很久，绝不能阻塞读 stdin / 写 stdout。教学版的同步 <code>handle()</code> 没这个问题，因为 mock 任务瞬间返回。</p>
+<table><thead><tr><th></th><th>教学版</th><th>真 codex-rs</th></tr></thead><tbody><tr><td>传输</td><td>进程内方法调用</td><td>JSON-RPC / stdio（子进程）或 HTTP</td></tr><tr><td>协议版本</td><td>字符串 <code>&quot;2025-06-18&quot;</code></td><td><code>ProtocolVersion::V_2025_06_18</code></td></tr><tr><td>并发</td><td>单线程同步</td><td>client 异步 rmcp；server 三条 tokio 任务</td></tr><tr><td>超时/取消</td><td>无</td><td>startup 30s、tool 120s、<code>CancellationToken</code></td></tr></tbody></table>
+</details>
+<details>
+<summary>二、命名冲突、长度上限与 SHA-1 哈希后缀</summary>
+<p>教学版直接 <code>mcp__{server}__{tool}</code> 拼起来就完事，因为我们的名字短、不会撞。真 <code>normalize_tools_for_model_with_prefix</code>（<a href="../../codex/codex-rs/codex-mcp/src/tools.rs"><code>tools.rs:149</code></a>）要解决三个现实问题：</p>
+<ol><li><strong>撞名</strong>：两个不同 server 的工具规整后可能同名 → 给冲突项追加 <code>_&lt;sha1前12位&gt;</code> 哈希后缀（<code>append_hash_suffix</code> / <code>CALLABLE_NAME_HASH_LEN = 12</code>）。</li><li><strong>长度</strong>：模型 API 对工具名有上限，<code>MAX_TOOL_NAME_LENGTH = 64</code> 字节，超了要截断 + 哈希。</li><li><strong>非法字符</strong>：<code>sanitize_responses_api_tool_name</code> 把 server/tool 名里 API 不接受的字符清洗掉。</li></ol>
+<p>所以真版区分&quot;原始名（protocol 调用用）&quot;和&quot;model-visible 名（喂给模型用）&quot;两套——教学版只有一套。</p>
+</details>
+<details>
+<summary>三、连接生命周期、资源聚合与工具暴露过滤</summary>
+<p>教学版 <code>clients</code> 是个 <code>dict</code>，<code>add_server</code> 顺序握手；<code>list_all_tools</code> 把所有工具无脑塞给模型。真 <code>McpConnectionManager</code> 远不止：</p>
+<ul><li>用一个 <code>JoinSet</code> <strong>并发</strong>启动所有 server，每个启动进度都通过事件往前端发（<code>McpStartupUpdateEvent</code> / 最后一条 <code>McpStartupComplete</code> 汇总 ready / failed / cancelled）。</li><li>还聚合 <strong>resources</strong> 与 <strong>resource templates</strong>（<code>list_all_resources</code> / <code>list_all_resource_templates</code>，带游标分页与重复游标检测）——MCP 不只有工具，还有可读资源，教学版完全略过。</li><li><strong>可见性过滤</strong>：<code>tool_is_model_visible</code>（<code>connection_manager.rs:86</code>）检查工具 <code>_meta.ui.visibility</code> 是否含 <code>&quot;model&quot;</code>，给&quot;只给人看、不给模型用&quot;的 UI 工具留了后门。</li><li><strong>数量阈值</strong>：<code>build_mcp_tool_exposure</code>（<a href="../../codex/codex-rs/core/src/mcp_tool_exposure.rs"><code>mcp_tool_exposure.rs</code></a>）有个 <code>DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD = 100</code>：工具太多时不直接全暴露，而是转成&quot;<strong>deferred</strong>（延迟/可搜索）&quot;工具，避免一次性塞爆模型上下文。</li></ul>
+</details>
+<details>
+<summary>四、服务端的双向：反过来向 client 请求审批，与 codex-reply 多轮续聊</summary>
+<p>这是&quot;Codex 当 server&quot;最有意思、也最能体现 MCP 双向性的两点：</p>
+<p><strong>反向审批（elicitation）</strong>——被调的 Codex 在跑任务时若要执行危险命令或打补丁，它需要审批，可此刻<strong>没有人</strong>，只有调用它的那个 client。于是审批本身也走 MCP，<strong>反方向</strong>发回去：<code>exec_approval.rs</code> / <code>patch_approval.rs</code> 定义了 <code>ExecApprovalElicitRequestParams</code> / <code>PatchApprovalElicitRequestParams</code>，server 向 client 发一个 elicitation/审批请求，等 client 回应再继续。也就是说：MCP server 既<strong>响应</strong> client 的 <code>tools/call</code>，又能<strong>主动向</strong> client 发请求——&quot;子代理把审批委托给上层&quot;。教学版的 <code>run_task</code> 直接执行 <code>shell</code>、不审批（对齐 s01 &quot;无黑名单&quot;基调），所以没有这条反向通道，但真实场景里&quot;agent 调 agent 时审批该由谁来批&quot;是个很现实的问题（<a href="../s14_guardian/index.html">s14</a> 的 Guardian 正是为无人值守而生的另一条答案）。</p>
+<p><strong>多轮续聊（codex-reply）</strong>——教学版每次 <code>codex</code> 调用都是<strong>全新</strong>任务、互不相关。真 server 还暴露第二个工具 <strong><code>codex-reply</code></strong>（<code>handle_call_tool</code> 的 <code>match</code> 里 <code>&quot;codex-reply&quot; =&gt; ...</code>）：第一次 <code>codex</code> 调用返回的 <code>structured_content.threadId</code>，调用方可以拿着它再发 <code>codex-reply { thread_id, prompt }</code>，<strong>在同一个会话里接着聊</strong>（<code>ThreadManager::get_thread</code>）。这把&quot;一次性外包&quot;升级成&quot;有状态的多轮委托&quot;。server 用 <code>running_requests_id_to_codex_uuid: Mutex&lt;HashMap&lt;RequestId, ThreadId&gt;&gt;</code> 把 MCP 请求 id 和 Codex thread id 对应起来。</p>
+<table><thead><tr><th></th><th>教学版</th><th>真 codex-rs</th></tr></thead><tbody><tr><td><code>codex</code> 调用</td><td>同步 <code>run_task</code> 返回 str</td><td>spawn thread + 流式转发所有 event</td></tr><tr><td>用什么循环</td><td>s01 简化循环</td><td>完整 core（沙箱/审批/SQ-EQ 全在）</td></tr><tr><td>返回</td><td>一段 text</td><td>text + <code>structured_content{threadId}</code></td></tr><tr><td>续聊</td><td>无</td><td><code>codex-reply</code> + thread_id</td></tr><tr><td>审批</td><td>直接执行</td><td>反向 elicitation 发回 client</td></tr></tbody></table>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s15_mcp/code.py --demo   # 一口气演示两个方向：client 列工具/调用/回灌 + server 处理四个请求（mock，无需 key）
+python s15_mcp/code.py          # 交互模式：默认走 client 方向（你的问题 → 模型 → MCP 工具）</code></pre>
+<p>交互模式默认演示 <strong>client</strong> 方向（最贴近&quot;你日常用 Codex 接外部工具&quot;）。想看 <strong>server</strong> 方向（Codex 被当成一次 <code>tools/call</code>），跑 <code>--demo</code> 即可——它会把 <code>initialize</code> / <code>tools/list</code> / <code>tools/call(shell)</code> / <code>tools/call(codex)</code> 四个请求接连喂给 <code>CodexMcpServer.handle()</code>，并打印每条 JSON-RPC 响应。</p>
+<p>默认 <code>backend=mock</code>，离线可跑。想接真模型，在根目录 <code>.env</code> 里填 <code>OPENAI_API_KEY</code>（详见 <a href="../.env.example">.env.example</a>）。</p>
+<h2 id="小结">小结</h2>
+<ul><li>MCP 把&quot;agent ↔ 工具&quot;标准化成一套 JSON-RPC（<code>initialize</code> / <code>tools/list</code> / <code>tools/call</code>），把 N×M 的胶水代码塌缩成 N+M。</li><li><strong>方向 A（client）</strong>：连接管理器三件事——连接握手 → 聚合并命名空间化（<code>mcp__server__tool</code>）→ 路由调用。回合循环一字未改，MCP 工具和内置工具在循环眼里没区别。</li><li><strong>方向 B（server）</strong>：Codex 自己 <code>handle(request)</code>，招牌工具 <code>codex</code> 一次调用 = 跑<strong>一整个 Codex 任务</strong>（内部就是 s01 回合循环）；真版还有 <code>codex-reply</code> 多轮续聊、反向审批。</li><li>两个方向<strong>同源</strong>：同一套 JSON-RPC、同一个 s01 循环，只是谁问谁答互换。</li><li>client 这一侧 Codex 和 Claude Code 几乎一样（开放标准的好处）；差异在 server——Codex 把整个 agent 暴露成别人的工具（agents-as-tools），这是&quot;为无人值守、可被编排&quot;下注的最直接体现。</li><li><strong>生产级</strong>：MCP server 在进程外——调用套 <code>tool_timeout</code>（hang 不卡死 agent）、并发连接且单个崩了只跳过、工具名命名空间化防撞名、外来工具照样过审批+沙箱（见「生产级」一节）。</li><li>下一站 <a href="../s16_config/index.html">s16</a>：一个开关切换一整套自主度——Config 与命名 profile。</li></ul>
+<h2 id="思考">思考</h2>
+<div class="think">
+<ol><li>真 Codex 给撞名工具加 12 位 SHA-1 后缀、还有 64 字节长度上限。如果模型看到的工具名变成 <code>mcp__db__query_a1b2c3d4e5f6</code>，它还分得清这是干嘛的吗？命名空间的&quot;可读性&quot;和&quot;唯一性&quot;该怎么权衡？</li><li>本章两侧都是进程内对象、零延迟、不会失败。一旦换成真 stdio 子进程：某个 server 启动要 30 秒、或中途崩了，回合循环该怎么办——阻塞等、跳过它、还是把&quot;这个工具暂时不可用&quot;也作为信息喂给模型？</li><li>当 Codex 被当成 server、跑任务时要执行危险命令——可此刻没有人，只有上层 agent。审批该由<strong>谁</strong>来批：上层 agent 自己决定？转发给上层背后的人？还是干脆 <code>approval_policy: never</code> + 全靠 <a href="../s05_sandbox/index.html">s05</a> 的内核沙箱兜底？不同选择对应了什么样的信任假设？这跟全书主线&quot;Codex 为低人工干预下注&quot;是契合还是张力？</li><li>现在 Codex 既能当 client 又能当 server。那么两个 Codex 互相调用、甚至 A 调 B、B 又调回 A，会发生什么？在这种&quot;agent 拓扑&quot;里，怎么防止无限递归、怎么追踪一次请求到底跑了多少层、花了多少 token？把 agent 变成&quot;可被任意拼装的工具&quot;，是解放了生产力，还是打开了一个新的复杂度黑洞？</li></ol>
+</div>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

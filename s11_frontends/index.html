@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s11: Frontends — 前端只是事件流的消费者（TUI + exec）</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s11-frontends-前端只是事件流的消费者tui-exec">s11: Frontends — 前端只是事件流的消费者（TUI + exec）</h1>
+<blockquote><em>&quot;一个 core 产出一条事件流；前端不含业务，只是这条流的消费者。终端、CI、IDE 各取所需。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s10_sq_eq_protocol/index.html">s10 SQ/EQ 协议</a> → <strong>s11 前端：TUI + exec</strong> → <a href="../s12_tools_extra/index.html">s12 更多工具</a></p>
+<hr>
+<h2 id="先把思想说透为什么换一张脸不用动大脑">先把思想说透：为什么换一张「脸」不用动「大脑」</h2>
+<p>到这里你已经知道，agent 的「大脑」就是那个回合循环（<a href="../s01_agent_loop/index.html">s01</a>）：调模型、跑工具、回灌、再调。但同一个大脑，可能要同时服务三种完全不同的用户——终端前盯着屏幕的人、CI 里没人看的脚本、IDE 后端的编辑器。怎么做到「一个大脑、很多张脸」，而且加一张新脸时大脑一行都不用改？想通下面三个道理，这一章就通了。</p>
+<p><strong>道理一：「做什么」和「怎么显示」是两件事，最容易犯的错就是把它们焊死。</strong> 最朴素的写法是：模型一回话就 <code>print</code>，命令一跑完就 <code>print</code>——把显示直接写进循环里。可一旦这么写，麻烦立刻接踵而来：想把朴素文本升级成带框线的漂亮界面，得去改循环里<strong>每一处</strong> <code>print</code>；想让 CI 用脚本解析输出，那些颜色和框线又会把脚本噎死。根子在于：<strong>「发生了什么」是大脑的事，「长什么样」是脸的事，把两者缠在一起，就谁也动不了谁。</strong></p>
+<p><strong>道理二：让大脑只「报告」、不「打印」，它就和所有的脸解耦了。</strong> 巧办法是：core 跑一个回合时不直接打印，而是一件件地<strong>报告发生了什么</strong>——「回合开始了」「我要跑这条命令」「命令跑完了，退出码 0」「我说完了」。每一件事就是一个<strong>事件</strong>（一个带 <code>type</code> 字段的小字典），按顺序排起来就是一条<strong>事件流</strong>。这就像后厨不停往外喊话——「开火了」「这道菜好了」——后厨只管喊，它<strong>根本不关心</strong>前厅怎么摆盘。喊话（事件流）成了大脑和脸之间唯一的接口，从此两边各自独立演化。</p>
+<p><strong>道理三（最关键）：脸不过是「听这条流」的消费者——所以脸可以有很多张，加一张不碰大脑。</strong> 既然 core 只往外喊事件，那任何一张「脸」要做的就只剩一件事：<strong>听这条流、决定怎么显示</strong>。终端里那张脸把每个事件画成带色框线（这段「把一个事件变成屏幕上几行」的代码就是<strong>渲染器</strong>，换渲染器 = 换显示风格，大脑不动）；CI 里那张脸把每个事件原样吐成一行 JSON（每行一个独立 JSON 对象的 <strong>JSONL</strong> 格式，脚本读一行解析一行，对自动化极其友好），再用<strong>退出码</strong>告诉 <code>&amp;&amp;</code> 和流水线这趟到底成没成。后者就是所谓 <strong>headless（无头）</strong>——没有人坐在终端前、没人回 y/N，全靠机器可读的输出和退出码说话（这正是 <code>codex exec</code>）。终端、CI、IDE 后端，本质上都只是「听同一条流」的消费者，区别只在听完往哪儿画。</p>
+<p>把这三点连起来：<strong>core 喊话，脸听话。</strong> 这一章就给你看两种听法——一种画给人看（TUI 渲染器），一种吐给机器读（headless exec）——而它们读的是<strong>同一条</strong>事件流，core 一行没改。这正是上一章 <a href="../s10_sq_eq_protocol/index.html">s10</a> 把输入输出拆成两条队列那条「架构脊梁」结出的果。</p>
+<h2 id="问题">问题</h2>
+<p>到 <a href="../s10_sq_eq_protocol/index.html">s10</a> 为止，Codex 已经把一个回合做成了「事件向外流（EQ）、操作向内流（SQ）」。但前面跑起来时，我们总是默认有个人坐在终端前看输出。现实里 Codex 要同时服务两种完全不同的「用户」：</p>
+<ul><li><strong>人</strong>，坐在终端前，想要一个漂亮、带颜色、会滚动的界面（TUI）；</li><li><strong>机器</strong>，CI / 管道 / 云端，没有 TTY、没人点审批，只想要<strong>能被程序解析的输出</strong>和<strong>一个表示成败的退出码</strong>。</li></ul>
+<p>最容易写错的版本是：把显示逻辑直接焊进回合循环——模型一回话就 <code>print</code>，命令一跑完就 <code>print</code>。这样写，几个问题立刻爆炸：</p>
+<ul><li><strong>换皮难</strong>：想从「纯文本」升级到「带框线的 ratatui 界面」，得去改循环里<strong>每一处</strong> <code>print</code>；</li><li><strong>多前端不可能</strong>：TUI、<code>codex exec</code>、app-server（IDE 后端）想复用同一套回合逻辑？做不到——逻辑和显示缠死了；</li><li><strong>机器读不了</strong>：CI 想 <code>| jq</code> 解析输出？花花绿绿的颜色和框线会把脚本噎死；</li><li><strong>测试难</strong>：要验证「命令失败时 UI 显示红叉」，得把整个模型循环跑起来。</li></ul>
+<p>Codex 的答案：<strong>让 core 只产出与前端无关的 typed 事件流；前端只是这条流的消费者。</strong> 谁爱怎么显示怎么显示，core 不管。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>把架构掰成「一条流、多个消费者」：</p>
+<pre><code>            run_turn_events(prompt)   ← core（搬自 s01 的回合循环，去掉所有 print）
+                     │
+                     │  yield 一条 typed 事件流：
+                     │    thread.started → turn.started →
+                     │    item.started/completed（命令、消息）→ turn.completed|failed
+                     ▼
+        ┌────────────────────────────┬────────────────────────────┐
+        │  消费者 A：TUI 渲染器         │  消费者 B：headless exec      │
+        │  （有人坐在终端前）            │  （CI / 管道 / 云端，无头）     │
+        │                            │                            │
+        │  WIDGETS 派发表             │  EventProcessor             │
+        │   事件类型→渲染函数           │   ├ HumanProcessor 人类文本    │
+        │   ├ BoxRenderer  盒子框线    │   └ JsonlProcessor --json     │
+        │   └ PlainRenderer 朴素一行   │      每行一个 JSON             │
+        │                            │                            │
+        │  换渲染器不碰 core            │  跑完据 error_seen 返回退出码    │
+        └────────────────────────────┴────────────────────────────┘</code></pre>
+<p>注意左右两边读的是<strong>同一条事件流</strong>。换渲染器（左边 <code>--plain</code>）、换处理器（右边 <code>--json</code>）都只改最末端那一层，<strong>core 一行不动</strong>。这就是「一个 core，多个前端」在最小尺度上的样子——真 codex 里还有第三个消费者 app-server（IDE/cloud 的 WebSocket 后端），同样只是「消费这条流」。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>，分三块：core、TUI 消费者、exec 消费者。</p>
+<p><strong>① core：把回合跑成事件流。</strong> <code>run_turn_events</code> 就是 s01 的 <code>run_turn</code>，唯一改动是<strong>把所有 <code>print</code> 换成 <code>yield 事件</code></strong>。事件分类对齐真 codex 的 <code>exec_events.rs</code>：每个「item」（命令、消息）有 <code>started</code> / <code>completed</code> 两拍。</p>
+<pre><code class="language-python">def run_turn_events(prompt):
+    yield {&quot;type&quot;: &quot;thread.started&quot;, &quot;thread_id&quot;: &quot;thr_demo&quot;}
+    yield {&quot;type&quot;: &quot;turn.started&quot;}
+    while True:
+        resp = model.respond(messages, tools=TOOLS, system=SYSTEM)
+        ...
+        yield {&quot;type&quot;: &quot;item.started&quot;,
+               &quot;item&quot;: {&quot;item_type&quot;: &quot;command_execution&quot;, &quot;command&quot;: cmd, &quot;status&quot;: &quot;in_progress&quot;}}
+        output, code = run_shell(cmd)
+        yield {&quot;type&quot;: &quot;item.completed&quot;,
+               &quot;item&quot;: {&quot;item_type&quot;: &quot;command_execution&quot;, &quot;command&quot;: cmd,
+                        &quot;aggregated_output&quot;: output, &quot;exit_code&quot;: code,
+                        &quot;status&quot;: &quot;completed&quot; if code == 0 else &quot;failed&quot;}}
+    yield {&quot;type&quot;: &quot;turn.completed&quot;, ...}   # 或 turn.failed</code></pre>
+<p><strong>② 消费者 A：TUI 渲染器（widgets as functions）。</strong> 每种事件对应一个纯函数 <code>(event) -&gt; list[str]</code>（要打印的行）。这是真 codex <code>history_cell/</code> 里那些 widget（<code>ExecCell</code>/<code>MessageCell</code>/<code>PatchCell</code>…）的极简化身。一张 <code>WIDGETS</code> 派发表把事件类型映射到渲染函数；想支持新事件？<strong>加一行</strong>。再套一个可整体替换的「渲染器」：</p>
+<pre><code class="language-python">WIDGETS = {&quot;thread.started&quot;: w_thread_started, &quot;turn.started&quot;: w_turn_started,
+           &quot;item.started&quot;: _w_item_started, &quot;item.completed&quot;: _w_item_completed, ...}
+
+class BoxRenderer:    # 查 WIDGETS 表，画带色框线
+    def render(self, event):
+        for ln in WIDGETS.get(event[&quot;type&quot;], ...)(event): print(ln)
+
+class PlainRenderer:  # 无视 widget 表，每个事件压成一行朴素文本
+    def render(self, event): print(f&quot;[{event[&#x27;type&#x27;]}] ...&quot;)</code></pre>
+<p><strong>③ 消费者 B：headless exec（人类文本 / JSONL）。</strong> 对应 <code>exec/src</code> 里 <code>EventProcessor</code> trait 的两个实现。<code>JsonlProcessor</code> 把每个事件 <code>print(json.dumps(...))</code>（一行一个 JSON）；<code>HumanProcessor</code> 挑关键事件上色给人看。每个 <code>process(event)</code> 返回「是否致命错误」，最后汇总成退出码——对应真 <code>lib.rs</code> 末尾的 <code>if error_seen { std::process::exit(1); }</code>：</p>
+<pre><code class="language-python">def run_exec(prompt, json_mode):
+    processor = JsonlProcessor() if json_mode else HumanProcessor()
+    error_seen = False
+    for event in run_turn_events(prompt):      # 同一条 core 流，换个消费者
+        if processor.process(event):
+            error_seen = True
+    return 1 if error_seen else 0              # 退出码：给 CI 的信号</code></pre>
+<p>两个驱动器 <code>drive_tui</code>（<code>for event: renderer.render(event)</code>）和 <code>run_exec</code>（<code>for event: processor.process(event)</code>）形状<strong>几乎一模一样</strong>——这种对称不是巧合，正是「core 与前端解耦」想达到的效果。</p>
+<blockquote><strong>关键：stdout 只放真正的输出。</strong> <code>--json</code> 时 stdout 必须是<strong>纯 JSONL</strong>，否则 <code>| jq</code> 会被噪声噎死。codexlib 的启动横幅默认打 stdout，本章用 <code>contextlib.redirect_stdout(sys.stderr)</code> 把它改道——真 codex exec 同样把配置摘要/告警写 stderr、只把结果写 stdout。</blockquote>
+<h3 id="走一遍">走一遍</h3>
+<p>我们跟着 <code>--demo</code> 走一遍：prompt 是 <code>执行 \</code>echo hello from codex\<code> 并报告结果</code>。demo 先把整条流收集成一个列表 <code>stream = list(run_turn_events(...))</code>，<strong>强调这是同一批事件</strong>，然后分别喂给两个消费者。</p>
+<p><strong>第 1 步</strong>：core 跑回合，产出事件。mock 后端看到「执行 …」就发一次 shell 调用，于是流里依次出现（每个就是一个字典）：</p>
+<pre><code>{&quot;type&quot;: &quot;thread.started&quot;, &quot;thread_id&quot;: &quot;thr_demo&quot;}
+{&quot;type&quot;: &quot;turn.started&quot;}
+{&quot;type&quot;: &quot;item.started&quot;,   &quot;item&quot;: {&quot;item_type&quot;: &quot;command_execution&quot;, &quot;command&quot;: &quot;echo hello from codex&quot;, &quot;status&quot;: &quot;in_progress&quot;}}
+{&quot;type&quot;: &quot;item.completed&quot;, &quot;item&quot;: {&quot;item_type&quot;: &quot;command_execution&quot;, &quot;command&quot;: &quot;echo hello from codex&quot;, &quot;aggregated_output&quot;: &quot;hello from codex&quot;, &quot;exit_code&quot;: 0, &quot;status&quot;: &quot;completed&quot;}}
+{&quot;type&quot;: &quot;item.completed&quot;, &quot;item&quot;: {&quot;item_type&quot;: &quot;agent_message&quot;, &quot;text&quot;: &quot;...&quot;}}
+{&quot;type&quot;: &quot;turn.completed&quot;, &quot;usage&quot;: {...}}</code></pre>
+<p>为什么是「两拍」（started + completed）？因为命令<strong>开始</strong>和<strong>结束</strong>是两个时刻——TUI 想在开始时先显示「(running…)」、结束时再补上「✓ 退出码 0」；JSONL 想让下游脚本能区分「在跑」和「跑完了」。同一条流满足两种需求。</p>
+<p><strong>第 2 步</strong>：消费者 A（<code>BoxRenderer</code>）拿到 <code>item.started</code> 那条，查 <code>WIDGETS[&quot;item.started&quot;]</code>，渲染成一行带色的 <code>$ exec echo hello from codex (running…)</code>；拿到 <code>item.completed</code> 渲染成 <code>✓ ok</code> + 输出。它<strong>只看事件，不知道命令是怎么跑的</strong>。</p>
+<p><strong>第 3 步</strong>：消费者 B（<code>JsonlProcessor</code>）拿到<strong>完全相同</strong>的那几条事件，每条 <code>print(json.dumps(event))</code>——原样吐成上面那 6 行 JSONL。<code>turn.completed</code> 不是 <code>turn.failed</code>，所以 <code>error_seen=False</code>，退出码 0。</p>
+<p><strong>为什么这一步是重点</strong>：第 2、3 步读的是同一个 <code>stream</code> 列表。它们的输出形态天差地别（终端界面 vs JSONL），但 <code>run_turn_events</code> 一行都没改。这就是「前端只是事件流的消费者」——你想加第三种前端（比如网页 dashboard），只要再写一个「听这条流」的消费者，core 依旧不动。</p>
+<h2 id="生产级前端要扛住流是断续的会回退会出错">生产级：前端要扛住&quot;流是断续的、会回退、会出错&quot;</h2>
+<p>&quot;core 产事件、前端只消费&quot;很干净，但真实的事件流是<strong>断续</strong>地来的：一个 <code>function_call</code> 先到一个空壳、参数再一点点 delta 进来；正文 <code>output_text</code> 一段段拼；中途还可能来一个错误或中断。一个能上生产的前端得处理这些：</p>
+<ul><li><strong>增量渲染</strong>：不能等一条消息完整才显示——要边收 delta 边刷新（流式打字机效果），否则用户对着一个&quot;假死&quot;的屏幕干等。</li><li><strong>乱序/回退的兜底</strong>：<code>MessagePhase</code>（commentary vs final，<a href="../s09_responses_api/index.html">s09</a>）会变、工具调用会被审批打断、回合会被 <code>Interrupt</code> 腰斩——前端要能把&quot;半条消息&quot;干净地收尾或撤回，而不是留一截烂尾 UI。</li><li><strong>无头前端的对等</strong>：<code>codex exec</code> 把同一条事件流序列化成 <strong>JSONL</strong>（每个事件一行）给 CI/管道消费。它和 TUI 看的是<strong>同一条流</strong>——所以&quot;显示逻辑&quot;必须完全从&quot;产生逻辑&quot;里剥离，否则无头模式就会和交互模式行为不一致。</li></ul>
+<blockquote>一句话：前端的生产级，是承认&quot;流是断续、会变、会断&quot;的，然后让每一种中途状态都有一个不难看的收场。core 只管忠实产事件；把这些都收拾干净，是前端这一层的活。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>前端与 core</td><td>UI 与 agent 循环耦合较紧</td><td><strong>事件流解耦</strong>：core 产出 <code>EventMsg</code>，前端只是消费者</td></tr><tr><td>前端数量</td><td>单一交互式 CLI/TUI 为主</td><td>TUI + <code>codex exec</code> + app-server <strong>共用同一个 core</strong></td></tr><tr><td>加一个新前端</td><td>往往要动到循环</td><td>写一个新的事件消费者即可，<strong>core 不动</strong></td></tr><tr><td>无头入口</td><td>有 <code>-p/--print</code> 等非交互用法，但重心在交互式</td><td><strong>一等公民</strong> <code>codex exec</code>：为自动化而生，<code>--json</code> 输出 JSONL</td></tr><tr><td>成败信号</td><td>以会话内交互为主</td><td><strong>退出码</strong>（<code>error_seen → exit(1)</code>）+ <code>turn.failed</code>，给 <code>&amp;&amp;</code> / CI 用</td></tr><tr><td>渲染粒度</td><td>偏整体输出</td><td>每类事件一个 widget（<code>history_cell/exec.rs</code>、<code>patches.rs</code>…），可单独演化</td></tr></tbody></table>
+<p><strong>为什么？</strong> 因为 Codex 一开始就设想「<strong>一个 core，多个前端</strong>」，而这些前端的运行场景天差地别：</p>
+<ul><li>终端里是 ratatui TUI，有人盯着，要好看、可交互；</li><li>CI / 管道里是 <code>codex exec</code>，<strong>没人盯着</strong>——它需要 JSONL（机器可读）+ 退出码（<code>&amp;&amp;</code> 和 CI 据此分支），而且 stdout 不能掺人类噪声；</li><li>IDE / cloud 里是 app-server，把事件发成 JSON-RPC <code>ServerNotification</code> 喂给编辑器。</li></ul>
+<p>要让这三种前端复用<strong>同一套回合逻辑</strong>，就<strong>不能</strong>把渲染写进循环——必须让 core 只产出与前端无关的 typed 事件，谁爱怎么画怎么画。这正是 <a href="../s10_sq_eq_protocol/index.html">s10</a> 把输入输出拆成两条队列（SQ/EQ）这条<strong>架构脊梁</strong>结出的果：s11 的 TUI 和 exec，就是这条脊梁上长出的<strong>两个不同前端</strong>——一个为人类交互（终端 widget），一个为无头自动化（机器读 + 退出码）。</p>
+<p>这和全课程主线一脉相承：<strong>Claude Code 以「人坐在终端/IDE 前交互」为中心</strong>，于是循环可以写得更直接，但也更难长出「无头」「IDE 后端」这些形态；<strong>Codex 下注「低/无人工干预的自主运行」</strong>，于是从架构上就把 core 和前端用一条事件流隔开。无头不是「把交互模式关掉」，而是<strong>为自动化重新设计的输出契约</strong>。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<p>本章 ~180 行（一条 core 流 + 两族消费者）对应的是真 codex 里两个完整的 crate：<code>codex-rs/tui</code>（上万行）和 <code>codex-rs/exec</code>。简化在哪、真版多做了什么？</p>
+<details>
+<summary>一、TUI 的 widget：教学版纯函数 vs history_cell 的 HistoryCell trait</summary>
+<p>教学版的 widget 是 <code>(event) -&gt; list[str]</code>。真 codex 的 <a href="../../codex/codex-rs/tui/src/history_cell/index.html"><code>tui/src/history_cell/</code></a> 里，每类条目是一个实现了 <code>HistoryCell</code> trait 的类型（<code>history_cell/mod.rs:189</code>）：</p>
+<pre><code class="language-rust">fn display_lines(&amp;self, width: u16) -&gt; Vec&lt;Line&lt;&#x27;static&gt;&gt;;             // 191 行
+fn render(&amp;self, area: Rect, buf: &amp;mut Buffer) { /* 默认画 display_lines */ }  // 301 行</code></pre>
+<table><thead><tr><th>条目类型</th><th>教学版</th><th>真 codex 模块</th></tr></thead><tbody><tr><td>命令执行</td><td><code>w_exec_begin</code>/<code>w_exec_end</code></td><td><code>history_cell/exec.rs</code> + <code>exec_cell/</code>（动画、流式输出、折叠）</td></tr><tr><td>消息气泡</td><td><code>w_agent_message</code></td><td><code>history_cell/messages.rs</code>（markdown 渲染、<code>markdown_render.rs</code>）</td></tr><tr><td>补丁 diff</td><td>（无）</td><td><code>history_cell/patches.rs</code> + <code>diff_render.rs</code>（彩色 diff）</td></tr><tr><td>MCP 调用</td><td>（无）</td><td><code>history_cell/mcp.rs</code></td></tr><tr><td>计划/待办</td><td>（无）</td><td><code>history_cell/plans.rs</code></td></tr><tr><td>审批</td><td>（无）</td><td><code>history_cell/approvals.rs</code>（带交互按钮，回 SQ）</td></tr></tbody></table>
+<p>关键共性没变：<strong>每类事件一个独立 widget，互不耦合</strong>，加一种新条目类型不会动到别的。区别是真 widget 要返回排版好的 <code>Vec&lt;Line&gt;</code>（含样式、按 <code>width</code> 折行），还要支持就地更新（命令流式输出时 <code>display_lines</code> 随时间变化）。</p>
+</details>
+<details>
+<summary>二、exec 的两个处理器：教学版 process 方法 vs 真 EventProcessor trait</summary>
+<p>真 codex 在 <a href="../../codex/codex-rs/exec/src/event_processor.rs"><code>exec/src/event_processor.rs</code></a> 定义了一个 trait，<code>human</code> / <code>jsonl</code> 两个处理器都实现它：</p>
+<pre><code class="language-rust">pub(crate) trait EventProcessor {
+    fn print_config_summary(&amp;mut self, config: &amp;Config, prompt: &amp;str, sc: &amp;SessionConfiguredEvent);
+    fn process_server_notification(&amp;mut self, notification: ServerNotification) -&gt; CodexStatus;
+    fn process_warning(&amp;mut self, message: String) -&gt; CodexStatus;
+    fn print_final_output(&amp;mut self) {}
+}</code></pre>
+<table><thead><tr><th></th><th>教学版</th><th>真 codex-rs</th></tr></thead><tbody><tr><td>接口</td><td>一个 <code>process(event) -&gt; bool</code></td><td>trait + 4 个方法（含配置摘要、warning、收尾）</td></tr><tr><td>选择</td><td><code>JsonlProcessor() if json_mode else HumanProcessor()</code></td><td><code>match json_mode { true =&gt; EventProcessorWithJsonOutput::new(..), _ =&gt; EventProcessorWithHumanOutput::create_with_ansi(..) }</code>（<code>lib.rs:671</code>）</td></tr><tr><td>返回值</td><td>bool（是否致命错误）</td><td><code>CodexStatus::{Running, InitiateShutdown}</code> 控制何时收尾退出</td></tr><tr><td>JSONL 处理器</td><td><code>print(json.dumps(...))</code></td><td><a href="../../codex/codex-rs/exec/src/event_processor_with_jsonl_output.rs"><code>event_processor_with_jsonl_output.rs</code></a> 把内部 <code>ServerNotification</code> 翻译成稳定的 <code>ThreadEvent</code>，再 <code>println!(serde_json::to_string(..))</code>，还维护 <code>next_item_id</code>、todo 列表、token 累计等状态</td></tr></tbody></table>
+<p>教学版把「致命错误」直接做成 <code>process</code> 的返回值；真版用一个 <code>CodexStatus</code> 枚举，让处理器能主动要求「该收尾了」（<code>InitiateShutdown</code>）。</p>
+</details>
+<details>
+<summary>三、事件种类：教学版 6 种 vs 协议里的几十种变体</summary>
+<p>教学版 core 只发 6 种事件（<code>thread.started</code> / <code>turn.started</code> / <code>item.started</code> / <code>item.completed</code> / <code>turn.completed</code> / <code>turn.failed</code>）。两边其实有<strong>两套</strong>事件命名，对应两个消费者：</p>
+<ul><li><strong>TUI 侧</strong>消费 <a href="../../codex/codex-rs/protocol/src/protocol.rs"><code>protocol/src/protocol.rs</code></a> 的 <code>EventMsg</code> 枚举（有几十个变体）：</li></ul>
+<pre><code>TurnStarted, AgentMessage, AgentMessageContentDelta, AgentReasoning,
+ExecCommandBegin, ExecCommandOutputDelta, ExecCommandEnd,
+PatchApplyBegin, PatchApplyEnd, McpToolCallBegin, McpToolCallEnd,
+WebSearchBegin, WebSearchEnd, TokenCount, PlanUpdate, TurnDiff,
+ExecApprovalRequest, ApplyPatchApprovalRequest, StreamError, ...</code></pre>
+<ul><li><strong>exec 侧</strong>消费 <a href="../../codex/codex-rs/exec/src/exec_events.rs"><code>exec/src/exec_events.rs</code></a> 的 <code>ThreadEvent</code>（对外稳定、可导出 TS 类型）：</li></ul>
+<pre><code class="language-rust">#[serde(tag = &quot;type&quot;)]
+pub enum ThreadEvent {
+    #[serde(rename = &quot;thread.started&quot;)] ThreadStarted(..),
+    #[serde(rename = &quot;turn.started&quot;)]   TurnStarted(..),
+    #[serde(rename = &quot;item.started&quot;)]   ItemStarted(..),
+    #[serde(rename = &quot;item.completed&quot;)] ItemCompleted(..),
+    #[serde(rename = &quot;turn.completed&quot;)] TurnCompleted(..),
+    #[serde(rename = &quot;turn.failed&quot;)]    TurnFailed(..), ...
+}</code></pre>
+<p>每个 item（<code>ThreadItemDetails</code>）也是一整套：<code>agent_message</code> / <code>reasoning</code> / <code>command_execution</code> / <code>file_change</code> / <code>mcp_tool_call</code> / <code>web_search</code> / <code>todo_list</code>。教学版只实现了 <code>agent_message</code> 与 <code>command_execution</code>（含真实的 <code>status</code> / <code>exit_code</code> / <code>aggregated_output</code> 字段）。</p>
+<p>注意 <code>EventMsg</code> 里的 <code>*Delta</code> 变体（<code>AgentMessageContentDelta</code> / <code>ExecCommandOutputDelta</code>）——真 TUI 要处理<strong>流式增量</strong>（模型边想边吐字、命令边跑边出 stdout），widget 得能「持续追加并重绘」。教学版每个事件「一拍到位」，所以渲染函数可以是无状态纯函数。</p>
+<p>为什么 exec 侧要单独搞一套 <code>ThreadEvent</code>？因为 JSONL 是<strong>对外契约</strong>：下游脚本、cloud、IDE 都按它 parse，字段一改就是 breaking change，所以才用 <code>ts-rs</code> 导出类型、字段名固定 <code>snake_case</code>、状态枚举显式（<code>in_progress</code>/<code>completed</code>/<code>failed</code>/<code>declined</code>）。</p>
+</details>
+<details>
+<summary>四、第三个消费者 app-server，与 exec 主循环的真实形态</summary>
+<p>本章最想让你记住的一句话：<strong>TUI、exec、app-server 是同一类东西——都是 core 事件流的消费者</strong>，只是渲染目标不同。</p>
+<table><thead><tr><th>前端</th><th>渲染成什么</th><th>入口 crate</th></tr></thead><tbody><tr><td>TUI</td><td>ratatui 终端界面</td><td><code>codex-rs/tui</code></td></tr><tr><td>exec</td><td>人类文本 / JSONL</td><td><code>codex-rs/exec</code></td></tr><tr><td>app-server</td><td>JSON-RPC <code>ServerNotification</code>，喂 IDE/cloud</td><td><code>codex-rs/app-server</code></td></tr></tbody></table>
+<p>它们消费的是<strong>同一套事件</strong>。这版 TUI 甚至已重构成消费 app-server 的 <code>ServerNotification</code>（见 <a href="../../codex/codex-rs/tui/src/app/app_server_event_targets.rs"><code>tui/src/app/app_server_event_targets.rs</code></a> 里那张巨大的派发表），和 exec 走同一条协议。</p>
+<p>而真 exec 的「循环」也不是教学版那个同进程 <code>for</code>。它是个<strong>客户端</strong>，连到一个 in-process app-server，循环消费 <code>next_event()</code>（<a href="../../codex/codex-rs/exec/src/lib.rs"><code>exec/src/lib.rs</code></a>）：</p>
+<pre><code class="language-rust">loop {
+    let server_event = tokio::select! {
+        maybe_interrupt = interrupt_rx.recv(), .. =&gt; { /* 发 TurnInterrupt */ continue; }
+        maybe_event = client.next_event() =&gt; maybe_event,        // lib.rs:955
+    };
+    match server_event {
+        ServerNotification(n) =&gt; match event_processor.process_server_notification(n) {
+            CodexStatus::Running =&gt; {}
+            CodexStatus::InitiateShutdown =&gt; { request_shutdown(..).await?; break; }  // 1001
+        }, ..
+    }
+}
+event_processor.print_final_output();                            // 1027
+if error_seen { std::process::exit(1); }                         // 1028：给 CI 的信号</code></pre>
+<p>差距：真版能在无头模式里<strong>响应 Ctrl-C / 信号发 <code>TurnInterrupt</code></strong>（<code>tokio::select!</code> 那一臂），把 <code>turn.failed</code> / <code>Error</code> 累计成 <code>error_seen</code>，还能 <code>--output-last-message &lt;file&gt;</code> 把最后一条消息写文件、<code>codex exec resume</code> 接着上次的 thread 跑、<code>--image</code> 喂本地图片。教学版把这些都压成「跑完循环、看 error_seen」，但保留了最本质的主干：<strong>prompt 进 → 事件流出 → 选消费者渲染 → 退出码表态。</strong></p>
+<p>教学版 <code>drive_tui</code> 那个 <code>for event in run_turn_events(prompt): renderer.render(event)</code>，和 <code>run_exec</code> 的 <code>for event in run_turn_events(prompt): processor.process(event)</code> 几乎一模一样——这种对称正是「core 与前端解耦」想达到的效果：前端可以有很多个，它们对 core 都只是「一个消费事件流的循环」。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s11_frontends/code.py --demo            # 离线：同一条流，先 TUI(box) 渲染、再 JSONL 输出（exit 0）
+python s11_frontends/code.py --json &quot;看看目录&quot;   # 无头 exec：argv 当 prompt，输出 JSONL
+python s11_frontends/code.py --exec &quot;执行 \`ls\`&quot; # 无头 exec：人类可读文本
+echo &quot;列出 TODO&quot; | python s11_frontends/code.py --exec   # stdin 喂 prompt
+python s11_frontends/code.py --plain           # 交互 TUI，换 [plain] 渲染器（core 一行不动）
+python s11_frontends/code.py                   # 交互 TUI（默认 box 渲染器；输入 q 退出）</code></pre>
+<p>默认 <code>backend=mock</code>，离线可跑。把 JSONL 交给脚本 parse 试试（注意 <code>2&gt;/dev/null</code> 把启动横幅滤掉，验证 stdout 是纯 JSONL）：</p>
+<pre><code class="language-bash">python s11_frontends/code.py --json &quot;执行 \`echo hi\`&quot; 2&gt;/dev/null \
+  | python3 -c &quot;import sys,json; [print(json.loads(l)[&#x27;type&#x27;]) for l in sys.stdin if l.strip()]&quot;
+# thread.started / turn.started / item.started / item.completed / item.completed / turn.completed</code></pre>
+<blockquote>小实验一：跑 <code>--demo</code>，对照「消费者 A」（TUI 框线）和「消费者 B」（JSONL）两段输出——它们来自<strong>同一个 <code>stream</code> 列表</strong>，core 没有任何改动。 小实验二：让模型跑一条会失败的命令（<code>python s11_frontends/code.py --json &quot;执行 \</code>false\<code>&quot;</code>），观察 <code>--json</code> 多出一条 <code>turn.failed</code>，且<strong>退出码变成 1</strong>——这正是 CI 据以判定成败的信号。</blockquote>
+<h2 id="小结">小结</h2>
+<ul><li>前端 = <strong>事件流的消费者</strong>，不含业务逻辑：core 产出 typed 事件，前端只把事件「显示出来」。</li><li>本章一次给出两族消费者：<strong>TUI 渲染器</strong>（widgets as functions + 可热插拔的 <code>Box</code>/<code>Plain</code> 渲染器）和 <strong>headless exec</strong>（人类文本 / JSONL + 退出码）。</li><li><strong>widgets as functions</strong>：每类事件一个独立渲染单元（真 codex 的 <code>history_cell/*</code>），可单独增删改。</li><li><strong>JSONL 是对外契约</strong>：stdout 必须纯净（人类噪声走 stderr），字段稳定，供脚本/CI/管道 parse；<strong>退出码</strong>让 Codex 能嵌进 <code>&amp;&amp;</code> 和 CI。</li><li>TUI、exec、app-server 是<strong>同一类消费者</strong>，只是渲染目标不同——这正是 <a href="../s10_sq_eq_protocol/index.html">s10</a> 队列解耦结出的果，也是「Codex 为低/无人工干预的自主运行下注」最直接的体现。</li><li><strong>生产级</strong>：事件流是断续的——前端要增量渲染（不假死）、给乱序/中断/回退兜底（不留烂尾 UI）、无头 <code>codex exec</code> 与 TUI 消费同一条流（显示与产生彻底剥离，见「生产级」一节）。</li><li>下一站 <a href="../s12_tools_extra/index.html">s12 更多工具</a>：给 agent 添 <code>plan</code> / <code>web_search</code> / <code>view_image</code> 等工具——它们产生的也只是这条事件流上的新事件。</li></ul>
+<h2 id="思考">思考</h2>
+<div class="think">
+<ol><li>教学版每个事件「一拍到位」，所以 widget 是无状态纯函数。可真 TUI 要处理 <code>ExecCommandOutputDelta</code> 这种<strong>流式增量</strong>——同一个命令的输出一段段到来。这时 widget 还能是纯函数吗？你会把「已经收到的输出」这个状态放在哪？放进 widget、放进渲染器、还是放进 core？</li><li>「core 不含渲染、前端不含逻辑」听起来很干净。但审批（<a href="../s10_sq_eq_protocol/index.html">s10</a>）天然要 TUI 弹个框、等用户点，再把决定通过 SQ 送回 core——这算「业务逻辑」泄漏进前端了吗？该由谁决定「这条命令需要审批」，由谁决定「弹窗长什么样」？无头的 exec 又凭什么可以跳过这一步？</li><li>同一条事件流要喂给三种前端（终端 / CI / IDE）。注意本章里 TUI 侧（<code>EventMsg</code>）和 exec 侧（<code>ThreadEvent</code>）其实是<strong>两套</strong>事件命名——为什么真 codex 不干脆只用一套？如果某种事件只有 TUI 用得上（比如纯装饰性的动画提示），把它放进<strong>对外稳定</strong>的 <code>ThreadEvent</code> 契约合适吗？这条边界你会划在哪？</li><li>如果某个命令在 stdout 里<strong>自己</strong>打印了一行看起来像 JSON 的内容，你的 <code>| jq</code> 管道会不会把它误当成一条事件？真 codex 用 stderr/stdout 分流 + 固定 schema 防这件事——你还能想到哪些「输出污染」会坑到下游脚本？</li><li>退出码只有 0/1 够用吗？如果一个回合「部分成功」（3 条命令成 2 条、1 条失败），CI 应该当成功还是失败？换成你来定，会怎么设计这个退出码语义？</li><li>如果让你给 Codex 加第四种前端——比如一个网页 dashboard——按本章的架构你需要写什么、又<strong>不</strong>需要碰什么？反过来想：Claude Code 那种「UI 和循环耦合较紧」的写法，加这个 dashboard 会多付出什么代价？</li></ol>
+</div>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

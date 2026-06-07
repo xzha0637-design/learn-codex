@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s13: Hooks — 在回合的关键时刻挂钩子</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s13-hooks-在回合的关键时刻挂钩子">s13: Hooks — 在回合的关键时刻挂钩子</h1>
+<blockquote><em>&quot;扩展点让用户改行为，而不必 fork 掉 core。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s12_tools_extra/index.html">更多工具：plan / web_search / view_image</a> → <strong>本章</strong> → <a href="../s14_guardian/index.html">Guardian</a></p>
+<hr>
+<h2 id="先把思想说透为什么要在循环上预留插口">先把思想说透：为什么要在循环上「预留插口」</h2>
+<p>回合循环（<a href="../s01_agent_loop/index.html">s01</a>）跑得好好的，但每个人、每个团队都有自己的「私心」：「<strong>任何</strong> <code>rm</code> 命令在我们这儿都不许跑」「每次工具调用前先记一条审计日志」「回合一结束自动跑一遍格式化」。这些需求五花八门、还因人而异。问题来了——怎么满足这些定制，又不把那个干净的循环搞脏？想通下面三个道理，钩子（hook）这个机制就不再是个新名词，而是一个你会觉得「本该如此」的设计。</p>
+<p><strong>道理一：把别人的定制塞进 core，是一条死路。</strong> 最直接的做法是：每来一个需求就往循环里加一个 <code>if</code>。可需求是无穷的、而且<strong>因人而异</strong>——你的团队禁 <code>rm</code>，他的团队禁 <code>curl</code>，再加几条循环就被业务逻辑塞爆，而且这些 <code>if</code> 对别人毫无意义。更糟的退路是「fork」：core 不给你留余地，你想定制就只能把整个项目拷一份、改源码、自己维护——别人一升级你就得手动合并，苦不堪言。两条路都不通，说明<strong>定制不该写进 core，但 core 又必须给定制留出位置</strong>。</p>
+<p><strong>道理二：那就在循环的关键时刻「预留插口」，让用户把自己的代码挂上去。</strong> 巧办法是：core 不去猜你想干什么，只在几个<strong>固定时刻</strong>留下挂载点，到点了就回头喊一声「这里有人要插话吗？」。这些固定时刻就是<strong>触发点</strong>，挂上去的那一小段代码就是<strong>钩子</strong>。这就像发动机外壳上预先钻好几个螺丝孔——core 厂家不知道你要装什么，但留好了孔，你想拧什么零件上去都行。本章留了四个孔：<code>pre_turn</code>（回合开始前）、<code>pre_tool</code>（每次用工具前）、<code>post_tool</code>（用完工具后）、<code>post_turn</code>（回合结束后）。从此「禁 <code>rm</code>」只是你挂在 <code>pre_tool</code> 上的一段代码，core 一行没动，也不必知道你的私心。</p>
+<p><strong>道理三（最关键）：插口不能只能「旁观」，得能「拦」、能「改」——但拦完要让模型知情。</strong> 如果钩子只能看不能动，那它顶多是个日志器。真正有用的插口得有<strong>权力</strong>：<code>pre_tool</code> 这个孔最特殊，挂在它上面的钩子能在命令真正执行前喊一声「<strong>不行</strong>」，把这次调用<strong>否决</strong>掉（好比安检员有权拦下一件行李）；或者不否决、但<strong>偷偷改写</strong>参数再放行——比如给命令强制加上 <code>--dry-run</code>（好比安检员没没收你的水，只是把瓶盖拧紧了放行）。但这里有个容易被忽略的关键：钩子否决之后<strong>不能默默丢弃</strong>，而要把「被否决了、理由是 X」当成这次工具调用的结果<strong>回灌给模型</strong>。为什么？因为模型本以为它跑了那条命令，你不告诉它「被拦了」，它就会基于一个错误的世界观继续往下走。回灌之后它才知道「这条路堵了」，转头换个法子。<strong>所以钩子不是背着模型搞小动作，而是在和模型「对话」。</strong></p>
+<p>把这三点连起来：<strong>钩子 = 在 core 预留的几个时刻挂自己的代码，不 fork 就能定制；其中 <code>pre_tool</code> 最有权力，能否决、能改写，且否决理由会回灌给模型。</strong> 这正是「让用户改行为，而不必 fork 掉 core」这句话落到实处的样子。</p>
+<h2 id="问题">问题</h2>
+<p>回合循环跑得好好的，但每个团队都有自己的「私心」：</p>
+<ul><li>「<strong>任何</strong> <code>rm</code> 命令在我们这儿都不许跑，哪怕模型觉得安全。」</li><li>「每次工具调用前，先把命令记进审计日志。」</li><li>「回合一结束，自动跑一遍 <code>prettier</code> 把改动格式化掉。」</li><li>「这个工具的参数，我想在执行前悄悄改写一下（比如强制加 <code>--dry-run</code>）。」</li></ul>
+<p>这些需求五花八门，而且<strong>因人而异</strong>。如果每来一个就往 core 里加一个 <code>if</code>，core 会被业务逻辑塞爆；更糟的是，用户为了一个小定制，只能去 fork 整个 Codex。</p>
+<p>需要的是一组<strong>稳定的扩展点</strong>：在回合的关键时刻&quot;开个口子&quot;，让用户挂上自己的逻辑——不碰 core，就能观察、否决、甚至改写。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>一个钩子注册表 + 四个<strong>触发点（fire point）</strong>。钩子是按事件名注册的普通可调用对象，循环跑到对应时刻就 <code>fire</code> 它们：</p>
+<pre><code>   run_turn(messages)
+        │
+   ┌────� fire(&quot;pre_turn&quot;) ─────────────────────────┐  回合开始
+   │                                                 │
+   │   model.respond(...)                            │
+   │        │                                         │
+   │   每个 tool_call:                                 │
+   │        │                                         │
+   │   ┌─ fire(&quot;pre_tool&quot;) ──▶ {block?} {command?}    │  ★ 可否决 / 可改写
+   │   │        │                                      │
+   │   │   block=True ─▶ 不执行，把理由回灌给模型 ──────┤
+   │   │   command=.. ─▶ 改写后再执行                    │
+   │   │        ▼                                       │
+   │   │   run_shell(command)                          │
+   │   │        ▼                                       │
+   │   └─ fire(&quot;post_tool&quot;) ─────────────────────────┤  工具调用后
+   │                                                  │
+   └──── fire(&quot;post_turn&quot;) ──────────────────────────┘  回合结束</code></pre>
+<p><code>pre_tool</code> 是最有权力的一个：它的返回值能<strong>否决</strong>这次工具调用（<code>block</code>），或<strong>改写</strong>它的参数（<code>command</code>）。其余三个触发点只做副作用（日志、格式化……）。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>，三块。</p>
+<p><strong>第 1 块</strong> — 注册表 + <code>fire()</code>。钩子按事件名分桶；<code>fire</code> 顺序执行，并对 <code>pre_tool</code> 特判否决/改写：</p>
+<pre><code class="language-python">HOOKS = {&quot;pre_turn&quot;: [], &quot;pre_tool&quot;: [], &quot;post_tool&quot;: [], &quot;post_turn&quot;: []}
+
+def register(event, fn): HOOKS[event].append(fn)
+
+def fire(event, ctx):
+    for fn in HOOKS[event]:
+        out = fn(ctx) or {}
+        if event == &quot;pre_tool&quot;:
+            if out.get(&quot;block&quot;):   return {&quot;block&quot;: True, &quot;reason&quot;: out.get(&quot;reason&quot;)}
+            if &quot;command&quot; in out:   ctx = {**ctx, &quot;command&quot;: out[&quot;command&quot;]}  # 改写
+    ...</code></pre>
+<p>「任一钩子否决就停在第一个否决」对应真源码 <code>Hooks::dispatch</code> 里 <code>if should_abort_operation { break }</code>（<a href="../../codex/codex-rs/hooks/src/registry.rs">registry.rs:94</a>）。</p>
+<p><strong>第 2 块</strong> — 把四个触发点织进 s01 的循环。骨架没变，只是在四处插了 <code>fire</code>：</p>
+<pre><code class="language-python">def run_turn(messages):
+    fire(&quot;pre_turn&quot;, {&quot;messages&quot;: messages})
+    while True:
+        resp = model.respond(...)
+        ...
+        for tc in resp.tool_calls:
+            gate = fire(&quot;pre_tool&quot;, {&quot;tool&quot;: tc.name, &quot;command&quot;: command})
+            if gate.get(&quot;block&quot;):
+                messages.append(tool_output_item(tc.call_id, f&quot;[blocked by hook] {gate[&#x27;reason&#x27;]}&quot;))
+                continue                      # ← 否决：不执行，理由回灌给模型
+            if &quot;command&quot; in gate: command = gate[&quot;command&quot;]   # ← 改写
+            output = HANDLERS[tc.name](command=command)
+            fire(&quot;post_tool&quot;, {&quot;output&quot;: output, ...})
+    fire(&quot;post_turn&quot;, {&quot;messages&quot;: messages})</code></pre>
+<p>注意被否决时，我们<strong>把否决理由作为工具结果回灌给模型</strong>——模型于是知道&quot;这条路被堵了&quot;，会换个法子。这和真源码一致。</p>
+<p><strong>第 3 块</strong> — 两个示例钩子：</p>
+<pre><code class="language-python">def block_rm(ctx):                                   # pre_tool：否决任何含 rm 的命令
+    if &quot;rm&quot; in (ctx.get(&quot;command&quot;) or &quot;&quot;).split():
+        return {&quot;block&quot;: True, &quot;reason&quot;: &quot;policy: `rm` is not allowed&quot;}
+    return {}
+
+def log_post_turn(ctx):                              # post_turn：打一行日志
+    print(f&quot;[hook] post_turn: 对话现在有 {len(ctx[&#x27;messages&#x27;])} 个 item&quot;)</code></pre>
+<p><code>--demo</code> 跑一个 canned 回合（不走模型）：模型先想 <code>echo</code>、再想 <code>rm -rf build</code>。结果 <code>echo</code> 正常执行，<code>rm</code> 被 <code>block_rm</code> 在执行前否决，<code>post_turn</code> 钩子打日志收尾。<code>rm</code> 从未真正运行。</p>
+<p><strong>走一遍。</strong> 我们跟着这个 canned 回合，盯住那个最关键的触发点 <code>pre_tool</code>，看<strong>每一步传给钩子的数据长什么样</strong>、钩子<strong>回了什么</strong>、core <strong>据此做了什么</strong>。已注册两个钩子：<code>block_rm</code>（挂在 <code>pre_tool</code>）和 <code>log_post_turn</code>（挂在 <code>post_turn</code>）。</p>
+<ol><li><strong>回合开始</strong>，core 触发 <code>pre_turn</code>。本 demo 没在这点挂钩子，略过。</li></ol>
+<ol><li>模型的第一个动作：跑 <code>echo hi</code>。执行前，core 把这次工具调用的信息打包成一个 <strong>ctx 字典</strong>，喂给每个 <code>pre_tool</code> 钩子：</li></ol>
+<pre><code class="language-json">   { &quot;tool&quot;: &quot;shell&quot;, &quot;command&quot;: &quot;echo hi&quot; }</code></pre>
+<p>   <code>block_rm</code> 检查命令里有没有 <code>rm</code>——没有，于是<strong>返回空字典 <code>{}</code></strong>（意思是&quot;我不拦、也不改&quot;）。core 看返回里没有 <code>block</code>，照常执行，得到输出 <code>hi</code>，再触发 <code>post_tool</code>。</p>
+<ol><li>模型的第二个动作：跑 <code>rm -rf build</code>。同样先打包 ctx 喂给 <code>pre_tool</code>：</li></ol>
+<pre><code class="language-json">   { &quot;tool&quot;: &quot;shell&quot;, &quot;command&quot;: &quot;rm -rf build&quot; }</code></pre>
+<p>   这次 <code>block_rm</code> 发现命令里有 <code>rm</code>，<strong>返回一张&quot;否决&quot;纸条</strong>：</p>
+<pre><code class="language-json">   { &quot;block&quot;: true, &quot;reason&quot;: &quot;policy: `rm` is not allowed&quot; }</code></pre>
+<p>   core 看到 <code>block: true</code>，<strong>立刻不执行</strong>这条命令。<code>rm -rf build</code> 从头到尾没被运行过——这就是钩子的否决权。</p>
+<ol><li><strong>关键的下一步：回灌。</strong> core 没有默默跳过，而是把否决理由当成这次工具调用的&quot;结果&quot;，追加进对话历史：</li></ol>
+<pre><code class="language-json">   { &quot;type&quot;: &quot;tool_output&quot;, &quot;call_id&quot;: &quot;...&quot;, &quot;output&quot;: &quot;[blocked by hook] policy: `rm` is not allowed&quot; }</code></pre>
+<p>   这条会喂回给模型。<strong>为什么？</strong> 因为模型本以为它跑了 <code>rm</code>，如果不告诉它&quot;被拦了&quot;，它会基于一个错误的世界观继续往下走。回灌之后，模型读到&quot;这条路被策略堵了&quot;，就会改走别的路（比如换个不删文件的做法）。</p>
+<ol><li><strong>回合结束</strong>，core 触发 <code>post_turn</code>，轮到 <code>log_post_turn</code> 钩子。它拿到的 ctx 里有整个对话：</li></ol>
+<pre><code class="language-json">   { &quot;messages&quot;: [ ... 此刻所有 item ... ] }</code></pre>
+<p>   它只是打一行日志（<code>对话现在有 N 个 item</code>），不改任何东西——这就是&quot;只做副作用&quot;的触发点的典型用法。</p>
+<p>把这一趟连起来看：<strong>同一个 <code>pre_tool</code> 触发点，对 <code>echo</code> 放行、对 <code>rm</code> 否决</strong>，区别只在钩子返回的那张纸条；而否决之后那一步<strong>回灌</strong>，是让模型&quot;知情并改道&quot;的关键。<code>rm</code> 全程未跑，core 一行没改——这正是&quot;不 fork 也能定制&quot;的样子。</p>
+<h2 id="生产级钩子是外部命令会挂会崩可能恶意">生产级：钩子是外部命令——会挂、会崩、可能恶意</h2>
+<p>教学版的钩子是进程内的 Python 函数，乖。但真 Codex 的钩子是<strong>用户机器上的任意外部命令</strong>——这是它的威力，也是它最大的风险面：一个藏在项目目录里的恶意 <code>PreToolUse</code> 钩子，能在你<strong>每次工具调用</strong>时执行任意代码。所以生产级的钩子系统，重点根本不在&quot;怎么触发&quot;，而在&quot;怎么不让它害你&quot;。两道关（本章 <a href="code.py">code.py</a> 的 <code>run_hook_safely</code> 演示了）：</p>
+<h3 id="一信任哈希不匹配的钩子不执行">一、信任：哈希不匹配的钩子不执行</h3>
+<p>你不能因为一个项目的 <code>.codex/hooks</code> 里写了个钩子，就无条件在自己机器上跑它。真 Codex 给每个钩子记一个 <strong><code>trusted_hash</code>（SHA-256）</strong>（<a href="../../codex/codex-rs/hooks/src/config_rules.rs"><code>config_rules.rs</code></a>）——只有哈希匹配（你信任过的那一版）才执行；项目里偷偷改了钩子内容、哈希对不上，就<strong>不跑</strong>。想全局放行可设 <code>bypass_hook_trust</code>（<code>registry.rs:33</code>），但那等于自己拆了这道闸。</p>
+<pre><code>(a) 信任校验：_evil_hook（untrusted）→ {&#x27;_skipped&#x27;: &#x27;untrusted hook 未执行（哈希不匹配）&#x27;}</code></pre>
+<h3 id="二超时-fail-closed挂死的钩子不能冻住每次工具调用">二、超时 + fail-closed：挂死的钩子不能冻住每次工具调用</h3>
+<p>钩子是外部进程，会卡死（死循环、等一个永不来的网络响应）。若同步等它，你的 agent 每次工具调用都跟着冻住。真 Codex 给钩子配 <code>timeout_sec</code>（<a href="../../codex/codex-rs/hooks/src/declarations.rs"><code>declarations.rs:69</code></a>）。而对一个<strong>安全用途</strong>的钩子（<code>PreToolUse</code>），超时/崩溃该倒向哪边？<strong>fail-closed = 当作否决</strong>——宁可拦错一个正常调用，也不能因为把关器挂了就把危险操作放过去（和 <a href="../s14_guardian/index.html">s14</a> Guardian、<a href="../s05_sandbox/index.html">s05</a> 沙箱同一个气质）。</p>
+<pre><code>(b) 超时 + fail-closed：_slow_hook（sleep 0.5s / 超时 0.1s）→ {&#x27;block&#x27;: True, &#x27;reason&#x27;: &#x27;hook 超时，fail-closed 当作否决&#x27;}</code></pre>
+<blockquote>一句话：钩子的生产级，不在&quot;能挂多少回调&quot;，而在<strong>把&quot;别人的代码跑在你的回合里&quot;这件事变得可控</strong>——只跑可信的、给它设上限、它出事就倒向安全。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<p>两边<strong>都有 hooks</strong>，这一章是少数 <code>≈</code>（大体相同）的章节之一——钩子是个通用的扩展模式。但同与不同各有落点：</p>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>有没有 hooks</td><td>有</td><td>有</td></tr><tr><td>触发点</td><td>PreToolUse / PostToolUse / Stop / Notification ...</td><td>PreToolUse / PostToolUse / Stop / SessionStart / UserPromptSubmit ...（10 个）</td></tr><tr><td>否决方式</td><td>钩子退出码 / JSON 决定</td><td>退出码 <code>2</code> 或 <code>permissionDecision:&quot;deny&quot;</code> → <code>should_block</code></td></tr><tr><td>长在哪套体系</td><td>独立的 hooks 配置</td><td>与<strong>审批策略（<a href="../s04_approval/index.html">s04</a>）/ Guardian（<a href="../s14_guardian/index.html">s14</a>）/ 事件协议（<a href="../s10_sq_eq_protocol/index.html">s10</a>）同一套</strong>：钩子的否决、审批的 Prompt、Guardian 的风险评估，都是同一条&quot;执行前的把关链&quot;上的环节</td></tr></tbody></table>
+<p><strong>为什么？</strong> 因为扩展点的价值就是<strong>让用户在不 fork core 的前提下定制行为</strong>——这一点两家想法一致，所以机制趋同。Codex 的差异不在&quot;有没有钩子&quot;，而在钩子<strong>和谁长在一起</strong>：它把 <code>PreToolUse</code> 钩子、<code>AskForApproval</code> 审批、Guardian 自动评审拼成同一条&quot;工具调用 → 执行&quot;之间的把关流水线。这条流水线越完整，Codex 就越能在低/无人工干预下（headless / CI / 云）安全地跑——这正是本课程的主线。Claude Code 的钩子更像一个相对独立的、围绕交互式体验的扩展层。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<p>本章的钩子是「同进程里的 Python 函数」；真 Codex 的钩子是「另起进程跑的外部命令」，并且兼容 Claude Code 的 hooks JSON 约定。下面拆开。</p>
+<details>
+<summary>一、本章四点 = 真源码十个事件名的子集</summary>
+<p>真源码 <code>hooks/src/lib.rs:19</code> 定义了 10 个事件名（<code>HOOK_EVENT_NAMES</code>）：</p>
+<pre><code class="language-rust">pub const HOOK_EVENT_NAMES: [&amp;str; 10] = [
+    &quot;PreToolUse&quot;, &quot;PermissionRequest&quot;, &quot;PostToolUse&quot;,
+    &quot;PreCompact&quot;, &quot;PostCompact&quot;, &quot;SessionStart&quot;,
+    &quot;UserPromptSubmit&quot;, &quot;SubagentStart&quot;, &quot;SubagentStop&quot;, &quot;Stop&quot;,
+];</code></pre>
+<p>本章的 <code>pre_tool</code> / <code>post_tool</code> 直接对应 <code>PreToolUse</code> / <code>PostToolUse</code>；<code>pre_turn</code> ≈ <code>UserPromptSubmit</code>（回合由用户输入开启）、<code>post_turn</code> ≈ <code>Stop</code>（回合收尾）。其余如 <code>PreCompact</code>/<code>PostCompact</code>（上下文压缩前后，见 <a href="../s07_context_compaction/index.html">s07</a>）、<code>SubagentStart</code>/<code>SubagentStop</code>（子 agent 生命周期）、<code>SessionStart</code>、<code>PermissionRequest</code> 本章未做。</p>
+<p>还有个细节：只有 8 个事件的 <strong>matcher 字段</strong>才有意义（<code>HOOK_EVENT_NAMES_WITH_MATCHERS</code>）——钩子可以用一个正则 matcher（如 <code>^Bash$</code>）只对特定工具触发，本章的 <code>block_rm</code> 是无差别对所有工具触发的简化版。</p>
+</details>
+<details>
+<summary>二、pre_tool 的真实契约：能否决，也能改写</summary>
+<p>真源码 <code>pre_tool_use.rs:37</code> 的输出结构，比本章的 <code>{block, command}</code> 字典丰富得多：</p>
+<pre><code class="language-rust">pub struct PreToolUseOutcome {
+    pub should_block: bool,              // 否决这次工具调用
+    pub block_reason: Option&lt;String&gt;,    // 否决理由（回灌给模型）
+    pub additional_contexts: Vec&lt;String&gt;,// 给模型追加上下文
+    pub updated_input: Option&lt;Value&gt;,    // 改写工具参数（本章的 command 改写）
+    pub hook_events: Vec&lt;HookCompletedEvent&gt;,
+}</code></pre>
+<p>钩子怎么表达否决/改写？它是一个外部命令，约定（兼容 Claude Code）是：</p>
+<table><thead><tr><th>钩子做了什么</th><th>结果</th></tr></thead><tbody><tr><td>退出码 <code>2</code>，stderr 写理由</td><td><code>should_block = true</code>，理由进 <code>block_reason</code></td></tr><tr><td>stdout 输出 <code>{&quot;hookSpecificOutput&quot;:{&quot;permissionDecision&quot;:&quot;deny&quot;, ...}}</code></td><td>否决</td></tr><tr><td>stdout 输出 <code>{... &quot;permissionDecision&quot;:&quot;allow&quot;, &quot;updatedInput&quot;:{...}}</code></td><td>放行 + 用 <code>updatedInput</code> <strong>改写参数</strong></td></tr><tr><td>退出码 <code>0</code>、无输出</td><td>放行、不改</td></tr></tbody></table>
+<p>多个钩子竞争改写时，真源码按<strong>完成顺序</strong>取最后一个（<code>latest_updated_input</code>，<code>pre_tool_use.rs:148</code>）。本章把这套协议压扁成函数返回字典——但「能否决、能改写、否决理由回灌给模型」这三件核心事是忠实的。</p>
+</details>
+<details>
+<summary>三、钩子在另一个进程里跑，不是同进程函数</summary>
+<p>本章 <code>register(&quot;pre_tool&quot;, block_rm)</code> 注册的是同进程 Python 函数；真 Codex 的钩子是配置在 hooks JSON / <code>config.toml</code> 里的一条<strong>外部命令</strong>，由 <code>ClaudeHooksEngine</code> 通过 <code>CommandShell</code> 起子进程执行（<code>registry.rs:60</code> 里那个 <code>shell_program</code> / <code>shell_args</code>）。</p>
+<p>这带来几个本章没有的真实复杂度：</p>
+<ul><li><strong>超时</strong>：每个钩子有 <code>timeout_sec</code>，跑太久会被杀（<code>ConfiguredHandler.timeout_sec</code>）。</li><li><strong>信任</strong>：钩子是用户机器上的任意命令，有 <code>bypass_hook_trust</code> / 信任校验，防止项目目录里偷塞恶意钩子。</li><li><strong>来源分层</strong>：钩子可来自 user / project / plugin 多个来源（<code>HookSource</code>），按来源和 <code>display_order</code> 排序分发。</li><li><strong>stdin 契约</strong>：core 把 <code>{session_id, turn_id, cwd, tool_name, tool_input, permission_mode, ...}</code> 序列化成 JSON 喂给钩子的标准输入（<code>command_input_json</code>, <code>pre_tool_use.rs:170</code>）。</li></ul>
+<p>一句话：本章是「进程内回调」，真实是「带超时、带信任、带分层、用 JSON 通信的子进程」。</p>
+</details>
+<details>
+<summary>四、钩子、审批、Guardian：执行前把关链上的三个环节</summary>
+<p>本章把钩子讲成一个孤立机制，但在真 Codex 里，&quot;工具调用 → 真正执行&quot;之间是一条<strong>把关链</strong>，钩子只是其中一环：</p>
+<pre><code>   model 要调 shell(command)
+        │
+   ① PreToolUse 钩子   ── should_block? ──▶ 否决（本章）
+        │ 未否决
+   ② 审批策略 (s04)    ── Decision::Prompt? ──▶ 问用户 / 自动拒
+        │ 需要问用户时
+   ③ Guardian (s14)    ── 先自动评一遍风险 ──▶ low 自动批 / critical 自动拒 / 否则升级
+        │ 放行
+   ④ 沙箱 (s05)        ── 内核强制 ──▶ 执行</code></pre>
+<p><code>PermissionRequest</code> 这个钩子事件正是②③的挂载点——钩子甚至能介入&quot;审批请求&quot;本身。这就是为什么 Codex 的钩子和审批/Guardian&quot;长在同一套体系里&quot;：它们不是四个互不相干的功能，而是同一条流水线上四个可插拔的关卡。理解了这条链，<a href="../s14_guardian/index.html">s14</a> 的 Guardian 就只是&quot;在问用户之前，先派一个 AI 评审员把关&quot;那一环。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s13_hooks/code.py --demo   # 不需要模型：canned 回合，看 pre_tool 否决 rm
+python s13_hooks/code.py          # 交互模式：含 rm 的命令会被钩子否决</code></pre>
+<p><code>--demo</code> 完全离线（<code>backend=mock</code>）。</p>
+<h2 id="小结">小结</h2>
+<ul><li>钩子 = 按事件名注册的可调用对象；循环在四个触发点 <code>fire</code> 它们：<code>pre_turn / pre_tool / post_tool / post_turn</code>。</li><li><code>pre_tool</code> 最有权力：能<strong>否决</strong>（<code>should_block</code>）也能<strong>改写</strong>（<code>updated_input</code>）工具调用；否决理由会回灌给模型。</li><li>真源码有 10 个事件、外部命令钩子、超时/信任/分层，本章取最小子集。</li><li><strong>生产级</strong>：钩子是外部命令——只跑哈希可信的（<code>trusted_hash</code>，防恶意项目钩子）、套 <code>timeout_sec</code>（挂死不冻住调用）、安全钩子超时即 fail-closed 当否决（见「生产级」一节）。</li><li>钩子不是孤岛：它和审批（<a href="../s04_approval/index.html">s04</a>）、Guardian（<a href="../s14_guardian/index.html">s14</a>）、事件协议（<a href="../s10_sq_eq_protocol/index.html">s10</a>）同属一条&quot;执行前把关链&quot;。</li><li>下一站 <a href="../s14_guardian/index.html">s14 Guardian</a>：把关链的下一环——让一个 AI 评审员在问用户之前先自动判风险。</li></ul>
+<h2 id="思考">思考</h2>
+<ol><li>本章的 <code>pre_tool</code> 钩子能改写命令参数（<code>updated_input</code>）。这很方便（自动加 <code>--dry-run</code>），但也意味着「模型以为它跑了 A、实际跑的是 B」。当出问题排查时，这种&quot;善意的偷改&quot;会不会比直接否决更难调试？你会怎么让改写对模型/用户透明？</li></ol>
+<ol><li>钩子在真 Codex 里是用户机器上的任意外部命令——这是它强大的根源，也是风险的根源：一个藏在项目目录里的恶意 <code>PreToolUse</code> 钩子，能在每次工具调用时执行任意代码。Codex 用&quot;信任校验&quot;来防。如果是你，会用什么标准决定&quot;哪些钩子可信&quot;？项目自带的钩子，默认该信任还是默认该怀疑？</li></ol>
+<ol><li>钩子、审批、Guardian、沙箱是同一条把关链上的四个关卡。如果一个 <code>pre_tool</code> 钩子放行了某命令、但审批策略要拒，谁说了算？反过来，钩子能否&quot;代替用户点同意&quot;绕过审批？把这条链的优先级定清楚，比单独做好每一环更重要——你会怎么排这个优先级？</li></ol>
+<ol><li>这一章是少数 Codex 和 Claude Code <code>≈</code>（大体相同）的地方。当两个系统在某个机制上趋同时，往往说明这个机制触到了某种&quot;通用最优解&quot;。钩子是不是这样一个通用扩展模式？还是说，它的趋同只是因为两家都在抄同一套（Claude Code 的）hooks JSON 约定？</li></ol>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

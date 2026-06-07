@@ -1,0 +1,4 @@
+# mock 后端（默认）无需任何依赖即可运行。
+# 想用真 OpenAI Responses API 后端时再装 openai。
+openai>=1.40.0
+python-dotenv>=1.0.0

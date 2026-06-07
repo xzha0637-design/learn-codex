@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s04: Approval Policy — 先问能不能做</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s04-approval-policy-先问能不能做">s04: Approval Policy — 先问能不能做</h1>
+<blockquote><em>&quot;审批是用户的同意书；沙箱是内核的禁令。两者正交。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · 上一章：<a href="../s03_apply_patch/index.html">s03 apply_patch</a> → <strong>s04</strong> → 下一章：<a href="../s05_sandbox/index.html">s05 sandbox</a></p>
+<hr>
+<h2 id="先把思想说透为什么要先问能不能做又为什么要让你调这个问的力度">先把思想说透：为什么要&quot;先问能不能做&quot;，又为什么要让你调这个&quot;问的力度&quot;</h2>
+<p>到 s03 为止，我们造的 agent 有个吓人的脾气：模型说跑什么，它就跑什么，中间没有任何人。这一章要补上一道关——但补这道关的&quot;思路&quot;，比关本身更值得想通。把下面三个道理想明白，你就懂了为什么 Codex 不是简单加个&quot;危险命令黑名单&quot;了事。</p>
+<p><strong>道理一：拦危险，不能靠&quot;把坏命令列出来&quot;。</strong> 最直觉的做法是写一张黑名单：<code>rm -rf /</code>、<code>sudo</code>…… 见到就拦。可这条路是死的。删整个 home 有多少种写法？<code>rm -rf ~</code>、<code>rm -fr $HOME</code>、<code>find ~ -delete</code>、甚至一段三行的 Python 脚本——你永远列不全，攻击者（或一个犯迷糊的模型）总能绕过你列的那几条。<strong>枚举坏东西注定漏</strong>。所以正确的问题不是&quot;哪些命令是坏的&quot;，而是&quot;这条命令我<strong>有没有把握</strong>它是安全的&quot;——没把握，就别擅自替用户做主。</p>
+<p><strong>道理二：没把握时，最稳的不是&quot;猜&quot;，而是&quot;问那个负责的人&quot;。</strong> 一个尽职的助理遇到拿不准的事，不会自作主张，也不会一概拒绝——他会回头问你一句&quot;这个要不要做？&quot;。&quot;先问能不能做&quot;（ask for approval）就是这个直觉：把&quot;拿不准的命令&quot;<strong>升级</strong>给真正负责后果的人来拍板。注意它和黑名单的根本不同——黑名单试图&quot;自己判对错&quot;，审批是&quot;承认自己判不全，于是把决定权交回给人&quot;。这一步，让 agent 从&quot;擅自行动&quot;变成&quot;先征得同意&quot;。</p>
+<p><strong>道理三（最关键，也最容易忽略）：&quot;问的力度&quot;必须能调，因为没有一个力度适合所有场景。</strong> 这里是 Codex 真正的巧思。你本地盯着屏幕用它，和它在半夜的 CI 流水线里无人值守地跑——对&quot;什么该停下来问、什么该自己放行&quot;的期待<strong>完全相反</strong>。你在场时，希望它别动不动打断你，只有真危险才问；没人在场时，一个&quot;等待你点同意&quot;的弹窗会让整条流水线<strong>永远卡住</strong>，这时你宁可它直接拒绝危险命令、绝不停下来等。 所以 Codex 不把&quot;要不要问&quot;写死成代码里的一句 <code>if</code>，而是做成一个<strong>可调的旋钮</strong>——几档策略，从&quot;凡事都先问&quot;一路滑到&quot;永不打扰&quot;。同一个 agent，换个档，就能从&quot;贴身结对的谨慎助手&quot;变成&quot;无人值守的自动化工人&quot;。<strong>把&#x27;自主程度&#x27;变成一个你能拧的旋钮</strong>，这就是审批这一章的灵魂。</p>
+<p>一句话串起来：黑名单想替你判对错（注定漏），审批承认判不全、于是该问就问（把决定权还给人），而那个&quot;问的力度&quot;被做成一个旋钮，让同一套机制覆盖从&quot;人盯着&quot;到&quot;没人管&quot;的整条光谱。</p>
+<h2 id="问题">问题</h2>
+<p>s01 的 shell 工具有个让人后背发凉的细节：模型说要跑什么，它就跑什么。没有黑名单，也没有人把关。</p>
+<p>那就加个危险命令黑名单？挡不住。命令的变体是无穷的——<code>rm -rf ~</code>、<code>rm -fr $HOME</code>、<code>find ~ -delete</code>、一个删文件的 Python 脚本……你永远列不全（这正是 <a href="../s05_sandbox/index.html">s05</a> 沙箱要解决的另一半问题）。</p>
+<p>但还有一个<strong>更前置</strong>的问题：<strong>有些时候我们根本不想让它自己决定，而想让人来拍板。</strong> 在你本地交互式地用 Codex，和在 CI 流水线里无人值守地跑 Codex，对「什么该自动放行、什么该停下来问」的容忍度完全不同。</p>
+<p>于是 Codex 把「要不要问用户」做成一个<strong>可调的策略</strong>，而不是写死在代码里的一句 <code>if</code>。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>一个审批门 <code>decide(command, policy) -&gt; &quot;approve&quot; | &quot;ask&quot; | &quot;reject&quot;</code>，外加 <strong>4 档策略</strong>，让你按场景切换自主度：</p>
+<pre><code>                 ┌──────────────── 审批门 decide() ────────────────┐
+   command ─────▶│  is_known_safe(cmd)?   is_dangerous(cmd)?        │
+                 │            │                    │                │
+                 │            ▼     × 策略档位 ×     ▼                │
+                 │   ┌─────────────────────────────────────────┐   │
+                 │   │ untrusted  : 白名单外一律 ask              │   │
+                 │   │ on-request : 危险才 ask，其余 approve       │   │
+                 │   │ on-failure : 先 approve，失败再 ask         │   │
+                 │   │ never      : 不问；危险直接 reject          │   │
+                 │   └─────────────────────────────────────────┘   │
+                 └──────────────────┬──────────────────────────────┘
+                                    ▼
+                  approve → 执行   ask → 问用户(y/N)   reject → 拒绝</code></pre>
+<p><code>approve</code> 直接放行，<code>reject</code> 直接拒，<code>ask</code> 才会把这一条「升级」给用户——弹出一个审批请求、等一个决定回来。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>，三块新东西。</p>
+<p><strong>第 1 块</strong> — 两套保守的启发式（不枚举坏命令，只判断「明显安全」与「明显危险」）：</p>
+<pre><code class="language-python">def is_known_safe(command):   # ls / cat / echo / pwd / grep / git status ...
+    ...
+def is_dangerous(command):    # rm -f|-rf / sudo / curl|wget ... | sh
+    ...</code></pre>
+<p>它们直接对应真源码的 <a href="../../codex/codex-rs/shell-command/src/command_safety/is_safe_command.rs"><code>is_known_safe_command</code></a> 与 <a href="../../codex/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs"><code>command_might_be_dangerous</code></a>。注意安全的 <code>git</code> 只有只读子命令（<code>status</code> / <code>log</code> / <code>diff</code> / <code>show</code> / <code>branch</code>），这和真源码 <code>is_safe_git_command</code> 一致。</p>
+<p><strong>第 2 块</strong> — 审批门 <code>decide()</code>，把启发式叠加上策略档位，裁出 <code>approve / ask / reject</code>：</p>
+<pre><code class="language-python">def decide(command, policy):
+    safe, danger = is_known_safe(command), is_dangerous(command)
+    if policy == &quot;untrusted&quot;:  return &quot;approve&quot; if safe else &quot;ask&quot;
+    if policy == &quot;on-request&quot;: return &quot;approve&quot; if safe else (&quot;ask&quot; if danger else &quot;approve&quot;)
+    if policy == &quot;on-failure&quot;: return &quot;ask&quot; if danger else &quot;approve&quot;
+    if policy == &quot;never&quot;:      return &quot;reject&quot; if danger else &quot;approve&quot;</code></pre>
+<p>这三个返回值正对应真源码的 <a href="../../codex/codex-rs/execpolicy/src/decision.rs"><code>Decision::{Allow, Prompt, Forbidden}</code></a>。各档的语义不是我编的，而是抄自 <a href="../../codex/codex-rs/protocol/src/protocol.rs"><code>AskForApproval</code> 的 doc-comment</a>（<code>protocol.rs:760</code>）：<code>UnlessTrusted</code> 序列化名就叫 <code>&quot;untrusted&quot;</code>，「只有已知安全且只读的命令自动批准」。</p>
+<p><strong>第 3 块</strong> — 用门包住 shell 工具。<code>ask</code> 这一档要真的去问人：</p>
+<pre><code class="language-python">def gated_shell(command, policy, ask_user):
+    verdict = decide(command, policy)
+    if verdict == &quot;approve&quot;: return _run(command)
+    if verdict == &quot;reject&quot;:  return &quot;[拒绝] 未执行&quot;
+    return _run(command) if ask_user(command, policy) else &quot;[用户拒绝] 未执行&quot;</code></pre>
+<p><code>ask_user</code> 这一来一回，对应真源码里 <a href="../../codex/codex-rs/protocol/src/approvals.rs"><code>ExecApprovalRequestEvent</code></a>（事件出）+ <a href="../../codex/codex-rs/protocol/src/protocol.rs"><code>Op::ExecApproval { decision }</code></a>（决定回），承载决定的是 <code>ReviewDecision</code>。这正是 <a href="../s10_sq_eq_protocol/index.html">s10</a> 那条「事件出、Op 回」队列的一个实例。</p>
+<p><strong>走一遍</strong> — 跟着同一条命令穿过审批门，看每一步的数据长什么样。假设模型在某个回合产出了这样一个工具调用：</p>
+<pre><code class="language-json">{ &quot;type&quot;: &quot;function_call&quot;, &quot;name&quot;: &quot;shell&quot;,
+  &quot;arguments&quot;: { &quot;command&quot;: &quot;rm -rf /&quot; } }</code></pre>
+<p>我们不直接执行它，而是先把 <code>command=&quot;rm -rf /&quot;</code> 喂进 <code>decide()</code>。第一步是两套启发式各跑一遍：</p>
+<pre><code class="language-python">is_known_safe(&quot;rm -rf /&quot;)  → False    # rm 不在只读白名单里
+is_dangerous(&quot;rm -rf /&quot;)   → True     # 命中 &quot;rm -rf&quot; 危险模式</code></pre>
+<p>拿到 <code>safe=False, danger=True</code> 这对布尔值后，<strong>同一条命令在不同策略档下会得到完全不同的裁决</strong>——这正是&quot;旋钮&quot;的意义：</p>
+<pre><code class="language-text">decide(&quot;rm -rf /&quot;, &quot;on-request&quot;) → &quot;ask&quot;      # 危险 → 升级问人
+decide(&quot;rm -rf /&quot;, &quot;never&quot;)      → &quot;reject&quot;   # 无人值守 → 直接拒，绝不停下等
+decide(&quot;rm -rf /&quot;, &quot;untrusted&quot;)  → &quot;ask&quot;      # 非白名单 → 一律先问</code></pre>
+<p>注意没有哪一档会无声放行它。拿 <code>on-request</code> 这一档继续走：裁决是 <code>&quot;ask&quot;</code>，于是 <code>gated_shell</code> 不执行，而是产出一个审批请求递给用户——真 Codex 里它是一条 <code>ExecApprovalRequestEvent</code>，长这样：</p>
+<pre><code class="language-json">{ &quot;type&quot;: &quot;exec_approval_request&quot;, &quot;call_id&quot;: &quot;call_42&quot;,
+  &quot;command&quot;: &quot;rm -rf /&quot;, &quot;cwd&quot;: &quot;/work&quot;,
+  &quot;available_decisions&quot;: [&quot;approved&quot;, &quot;denied&quot;, &quot;abort&quot;] }</code></pre>
+<p>用户看到后回一个决定（<code>denied</code>）。这一来一回回到 <code>gated_shell</code>，它据此返回 <code>&quot;[用户拒绝] 未执行&quot;</code>——命令从头到尾<strong>没有真的跑</strong>。把这三步连起来看，你就摸到了审批的全貌：<em>启发式给出&quot;有没有把握&quot;，策略档把这份把握翻译成&quot;放行/问/拒&quot;，问的话再走一条出—回的审批回路</em>。</p>
+<p><code>--demo</code> 把同一条 <code>rm -rf /</code> 喂进 <code>untrusted</code> / <code>on-request</code> / <code>never</code> 三档，打印每档的决定，并让「模拟用户」在被问到时拒绝——证明危险命令在三档下都没被真正执行。</p>
+<h2 id="生产级审批不是一个-bool是带记忆有刹车的决定">生产级：审批不是一个 bool，是带记忆、有刹车的决定</h2>
+<p>教学版的审批门很优雅，但它把&quot;用户的答复&quot;压成了一个 <code>bool</code>（同意/拒绝）。一个能上生产的审批系统，狠在三件事上——它们恰好回答了&quot;越用越顺手会不会越用越危险&quot;。</p>
+<h3 id="一用户的答复是-reviewdecision不止同意拒绝">一、用户的答复是 ReviewDecision，不止&quot;同意/拒绝&quot;</h3>
+<p>真 Codex 审批回路里用户回的是 <a href="../../codex/codex-rs/protocol/src/protocol.rs"><code>ReviewDecision</code></a>（<code>protocol.rs:3660</code>）：</p>
+<table><thead><tr><th>决定</th><th>含义</th></tr></thead><tbody><tr><td><code>Approved</code></td><td>这一次放行</td></tr><tr><td><code>ApprovedForSession</code></td><td>放行，且<strong>记进会话缓存</strong>——同前缀命令本会话内不再问</td></tr><tr><td><code>ApprovedExecpolicyAmendment</code></td><td>放行，且<strong>学成一条永久 allow 规则</strong></td></tr><tr><td><code>Denied</code>（默认）</td><td>拒绝，但继续会话、让模型换个法子</td></tr><tr><td><code>TimedOut</code></td><td>自动评审超时 → <strong>按拒处理</strong>（fail-closed，呼应 <a href="../s14_guardian/index.html">s14</a>）</td></tr><tr><td><code>Abort</code></td><td>拒绝并停下，等用户下一步</td></tr></tbody></table>
+<p>注意 <code>Denied</code> 是 <code>#[default]</code>、<code>TimedOut</code> 也倒向拒——<strong>默认值全朝安全那边倒</strong>，和沙箱 <a href="../s05_sandbox/index.html">s05</a> 的 deny-default 一个气质。</p>
+<h3 id="二会话缓存越用越少打扰">二、会话缓存：越用越少打扰</h3>
+<p><code>ApprovedForSession</code> 把批准过的命令前缀记进缓存，下次同前缀直接 auto-approve、不再打断你。<code>--demo</code> 演示了这条：</p>
+<pre><code>用户对 `cargo build --release` 选 ApprovedForSession → ✓ 已记住：本会话内 `cargo …` 自动放行
+下次 `cargo test` 的裁决 → auto-approve（会话缓存命中）（没再打扰用户）</code></pre>
+<h3 id="三刹车banned_prefix越用越顺手-越用越宽松">三、刹车：BANNED_PREFIX——越用越顺手 ≠ 越用越宽松</h3>
+<p>&quot;学习放行&quot;听着爽，却藏着陷阱：若你能把 <code>python</code> 学成永久 allow，以后<strong>任何</strong> <code>python -c &quot;...&quot;</code> 都不问了——审批等于被架空。真 Codex 用 <code>BANNED_PREFIX_SUGGESTIONS</code>（<a href="../../codex/codex-rs/core/src/exec_policy.rs"><code>exec_policy.rs:52</code></a>）挡住这类前缀：<code>python</code> / <code>bash</code> / <code>sh</code> / <code>zsh</code> / <code>git</code> / <code>pwsh</code>…… 这些能跑任意代码的解释器/shell，<strong>再怎么批准也不会被泛化成规则</strong>：</p>
+<pre><code>✗ 拒绝把 `python` 学成永久放行：它能跑任意代码，泛化它等于架空审批（BANNED_PREFIX）
+✗ 拒绝把 `git` 学成永久放行：……</code></pre>
+<blockquote>一句话：生产级审批 = <strong>可记忆（少打扰）+ 有刹车（不滑坡）+ 默认朝拒（fail-closed）</strong>。&quot;approve once&quot; 容易，难的是&quot;approve 之后系统不会因此变得不安全&quot;。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>审批形态</td><td>危险操作<strong>即时弹窗</strong>问你</td><td>显式、可调的<strong>策略档位</strong>（<code>untrusted/on-request/on-failure/never</code>）</td></tr><tr><td>谁来配</td><td>体验内置，少有暴露的&quot;模式&quot;</td><td>用户/项目可在 <code>config.toml</code>、命令行、profile 里选档（见 <a href="../s16_config/index.html">s16</a>）</td></tr><tr><td>与沙箱的关系</td><td>审批 + 路径校验是主防线（应用层）</td><td>审批与沙箱<strong>正交</strong>：审批=用户同意，沙箱=内核强制（见 <a href="../s05_sandbox/index.html">s05</a>）</td></tr><tr><td>适配场景</td><td>偏交互式、人在回路</td><td>同一套策略覆盖交互 / 无头 CI / 云端——只是换个档</td></tr></tbody></table>
+<p><strong>为什么不同？</strong> 因为 Codex 要在<strong>自主度的连续谱</strong>上滑动，而不是只服务「人盯着」这一个场景：</p>
+<ul><li>你本地敲代码，挂 <code>on-request</code>：日常命令自己跑，碰到危险的才停下来问你。</li><li>CI 流水线里 <code>codex exec</code> 无人值守，挂 <code>never</code>：永不卡在一个没人回应的弹窗上——危险命令要么靠沙箱兜底，要么直接拒。</li><li>想最大化谨慎，挂 <code>untrusted</code>：除了少数只读命令，什么都先问。</li></ul>
+<p>而最关键的一点，是把<strong>审批和沙箱拆成正交的两层</strong>（这正是本课程主线在本章的落点）：审批回答「<strong>用户同不同意</strong>」，是应用层、由人把关的一道关；沙箱（<a href="../s05_sandbox/index.html">s05</a>）回答「<strong>内核让不让碰</strong>」，是内核层、机器强制的一道关。一条命令完全可以「被批准、但仍然跑在沙箱里」——批准只是放它进门，沙箱仍然限制它在门内能碰什么。Claude Code 把审批弹窗 + 路径校验当主防线；Codex 多压了一道独立于人的内核防线，于是才敢把审批档位调到 <code>never</code> 去无人值守地跑。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<p>教学版 4 个 <code>if</code> 的 <code>decide()</code>，在真 codex-rs 里是一整套 <strong>execpolicy</strong> 子系统 + 一条审批事件回路。下面拆开看差在哪。</p>
+<details>
+<summary>一、本章的 4 档，是真源码 AskForApproval 枚举的真实变体</summary>
+<p>真源码 <code>protocol.rs:760</code> 的枚举（doc-comment 我直接抄进了 code.py）：</p>
+<table><thead><tr><th>本章字符串</th><th>真源码变体</th><th>doc-comment 原意</th></tr></thead><tbody><tr><td><code>&quot;untrusted&quot;</code></td><td><code>AskForApproval::UnlessTrusted</code></td><td>只有 <code>is_safe_command()</code> 认定的「只读」命令自动批准，其余都问</td></tr><tr><td><code>&quot;on-failure&quot;</code></td><td><code>AskForApproval::OnFailure</code></td><td>全部自动批准（指望跑在沙箱里），失败才升级问用户</td></tr><tr><td><code>&quot;on-request&quot;</code></td><td><code>AskForApproval::OnRequest</code>（<code>#[default]</code>）</td><td>模型决定何时问用户</td></tr><tr><td><code>&quot;never&quot;</code></td><td><code>AskForApproval::Never</code></td><td>永不问；失败直接回给模型</td></tr></tbody></table>
+<p>注意真源码还有第 5 个变体 <code>Granular(GranularApprovalConfig)</code>——逐项开关 <code>sandbox_approval</code> / <code>rules</code> / <code>mcp_elicitations</code> / <code>request_permissions</code> 等，把「问 vs 自动拒」做到一个个审批流的粒度。本章为教学省略了它。</p>
+<pre><code class="language-rust">// protocol.rs:760
+pub enum AskForApproval {
+    UnlessTrusted,                 // serde &quot;untrusted&quot;
+    OnFailure,
+    OnRequest,                     // #[default]
+    Granular(GranularApprovalConfig),
+    Never,
+}</code></pre>
+</details>
+<details>
+<summary>二、真正的裁决器是 execpolicy：前缀规则状态机，不是几个 if</summary>
+<p>本章的 <code>decide()</code> 把判断写成 Python 分支；真 Codex 的判断主体在 <code>codex-rs/execpolicy</code> 这个独立 crate 里，是一套<strong>前缀规则（prefix rule）</strong>引擎：</p>
+<ul><li>规则写在 <code>.rules</code> 文件里（Starlark 方言），形如 <code>prefix_rule([&quot;git&quot;, &quot;push&quot;], decision=&quot;prompt&quot;)</code>、<code>prefix_rule([&quot;rm&quot;], decision=&quot;forbidden&quot;)</code>。</li><li><code>ExecPolicyManager</code>（<code>core/src/exec_policy.rs:235</code>）从多层 config 目录按优先级加载、合并这些规则，对一条命令做 <code>check_multiple_with_options(...)</code>，匹配最具体的前缀。</li><li><strong>匹配不到任何规则</strong>时，才回退到本章的两套启发式：<code>render_decision_for_unmatched_command()</code>（<code>exec_policy.rs:628</code>）——这个函数才是「未知命令 + 策略档位 → Allow/Prompt/Forbidden」的真实裁决逻辑，本章的 <code>decide()</code> 就是它的极简投影。</li></ul>
+<p>裁决结果不是裸的 <code>Decision</code>，而是包成 <code>ExecApprovalRequirement</code>（<code>core/src/tools/sandboxing.rs:160</code>）：</p>
+<pre><code class="language-rust">enum ExecApprovalRequirement {
+    Skip { bypass_sandbox: bool, .. },   // Allow：直接跑（甚至可绕过沙箱）
+    NeedsApproval { reason, proposed_execpolicy_amendment, .. },  // Prompt：问用户
+    Forbidden { reason },                // Forbidden：拒
+}</code></pre>
+<p><code>Skip</code> 里那个 <code>bypass_sandbox</code> 字段，正是「审批与沙箱正交」在类型层面的证据：被 execpolicy 显式 allow 的命令可以<strong>跳过沙箱</strong>，其余命令即便批准了也照样进沙箱。</p>
+</details>
+<details>
+<summary>三、批准一次，能顺手写一条规则进 execpolicy</summary>
+<p>真源码的审批比「approve / reject」更丰富。<code>ReviewDecision</code>（<code>protocol.rs:3660</code>）有这些分支：</p>
+<table><thead><tr><th>变体</th><th>含义</th></tr></thead><tbody><tr><td><code>Approved</code></td><td>批准这一次</td></tr><tr><td><code>ApprovedForSession</code></td><td>本会话内同类请求都自动批</td></tr><tr><td><code>ApprovedExecpolicyAmendment { proposed_execpolicy_amendment }</code></td><td>批准 + <strong>把这个前缀写成一条 allow 规则</strong>，以后同前缀命令免问</td></tr><tr><td><code>NetworkPolicyAmendment { .. }</code></td><td>持久化一条网络 allow/deny 规则</td></tr><tr><td><code>Denied</code></td><td>拒绝这一次，但继续会话、换个法子</td></tr><tr><td><code>Abort</code></td><td>拒绝并停下，等用户下一步</td></tr></tbody></table>
+<p>也就是说，当门判 <code>Prompt</code> 时，真源码会顺带 <code>derive</code> 一个 <code>ExecPolicyAmendment</code>（一个命令前缀），随审批请求一起递给你；你选 <code>ApprovedExecpolicyAmendment</code>，它就 <code>append_amendment_and_update()</code> 把 <code>prefix_rule([...], allow)</code> 落盘进 <code>default.rules</code>——下次同类命令不再问你。本章的 <code>gated_shell</code> 只返回执行/不执行，没有这个「学习」回路。</p>
+</details>
+<details>
+<summary>四、审批不是同步弹窗，而是穿过 SQ/EQ 的一来一回</summary>
+<p>本章 <code>ask_user(command, policy)</code> 是个同步函数调用——问完立刻拿到布尔值。真 Codex 做不到这么简单，因为它要在<strong>一个回合进行到一半</strong>时弹审批，还要让 TUI / <code>codex exec</code> / app-server 三种前端都能回应（见 <a href="../s10_sq_eq_protocol/index.html">s10</a>）。</p>
+<p>所以真实路径是异步的：core 产出一条 <code>ExecApprovalRequestEvent</code>（<code>approvals.rs:217</code>，带 <code>call_id</code> / <code>command</code> / <code>cwd</code> / <code>parsed_cmd</code> / <code>proposed_execpolicy_amendment</code> / <code>available_decisions</code>）丢进<strong>事件队列</strong>；前端渲染、问到用户；用户的决定包成 <code>Op::ExecApproval { id, decision }</code>（<code>protocol.rs:504</code>）丢回<strong>提交队列</strong>；core 收到才继续这一回合。</p>
+<pre><code>core ──ExecApprovalRequestEvent──▶ (EQ) ──▶ 前端弹窗
+core ◀──Op::ExecApproval{decision}── (SQ) ◀── 用户点了批准/拒绝</code></pre>
+<p>本章把这一来一回压扁成一次函数调用；<a href="../s10_sq_eq_protocol/index.html">s10</a> 会把这两条队列单独拆开讲。而 <a href="../s14_guardian/index.html">s14</a> 的 Guardian 则在这条回路上再插一层：<strong>在问用户之前，先让一个自动评审员判一遍风险</strong>。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s04_approval/code.py --demo   # 不需要模型：3 档策略 × 安全/危险命令，打印决定
+python s04_approval/code.py          # 交互模式：shell 命令先过审批门（默认 on-request）</code></pre>
+<p><code>--demo</code> 完全离线（<code>backend=mock</code>）。想接真模型，在根目录 <code>.env</code> 填 <code>OPENAI_API_KEY</code>。</p>
+<h2 id="小结">小结</h2>
+<ul><li>审批门 <code>decide(command, policy) → approve | ask | reject</code>，对应真源码 <code>Decision::{Allow, Prompt, Forbidden}</code>。</li><li>4 档策略 <code>untrusted / on-request / on-failure / never</code> 是真源码 <code>AskForApproval</code> 的真实变体，让自主度在「凡事都问」到「永不问」之间滑动。</li><li>不枚举坏命令，只判「明显安全 / 明显危险」，其余交给策略档位。</li><li><strong>审批 ≠ 沙箱</strong>：审批是用户的同意（应用层），沙箱是内核的禁令（<a href="../s05_sandbox/index.html">s05</a>，内核层），两者正交、可叠加。</li><li><strong>生产级</strong>：审批是带记忆的 <code>ReviewDecision</code>——<code>ApprovedForSession</code> 进会话缓存（越用越少打扰）、<code>BANNED_PREFIX</code> 挡住把解释器学成永久放行（不滑坡）、<code>TimedOut</code>/<code>Denied</code> 默认朝拒（fail-closed）。见「生产级」一节。</li><li>下一站 <a href="../s05_sandbox/index.html">s05</a>：当没人审批时，靠什么兜底？把命令关进内核沙箱。</li></ul>
+<h2 id="思考">思考</h2>
+<ol><li>本章的 <code>on-failure</code> 在没有沙箱时，对危险命令选择了「先问」。可真源码的 <code>OnFailure</code> 是「<strong>全部先跑</strong>、失败才问」——它敢这么做，靠的是命令都跑在沙箱里。如果你只有审批、没有沙箱，你还敢让 <code>on-failure</code> 先跑吗？这是否说明「审批档位」的胆量，其实是被「有没有沙箱」借出来的？</li></ol>
+<ol><li><code>ApprovedExecpolicyAmendment</code> 让用户批准一次就把前缀写成永久 allow 规则，越用越少打扰。但「越用越顺手」和「越用越宽松」往往是同一件事——你会给这种自动学习加上什么刹车？（提示：真源码有个 <code>BANNED_PREFIX_SUGGESTIONS</code>，<code>python</code> / <code>bash</code> / <code>sudo</code> 永远不准被建议成 allow 前缀，为什么是这几个？）</li></ol>
+<ol><li>Claude Code 用即时弹窗、Codex 用可调档位。如果你在写一个跑在 CI 里、没人盯着的 agent，<code>never</code> 档配合沙箱够安全吗？反过来，一个本地结对编程的 agent，频繁弹窗会不会反而训练用户「无脑点同意」，把审批变成橡皮图章？</li></ol>
+<ol><li>审批问的是「用户同不同意」，沙箱问的是「内核让不让碰」。把它们做成正交的两层，好处是各自可独立调强弱；但对用户来说，「这条命令被批准了却还是失败」会不会反而比单一防线更难理解？你会怎么把这两层的状态呈现给用户？</li></ol>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

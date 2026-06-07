@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>learn-codex — 独立技术教育评审报告</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="learn-codex-独立技术教育评审报告">learn-codex — 独立技术教育评审报告</h1>
+<blockquote>评审对象：<code>learn-codex</code>（用 Python 从零拆解 OpenAI Codex 架构的教学仓库） 对标基准：<code>learn-claude-code</code>（同作者心中的「高 star」质量标杆） 评审方式：通读根 README + 全部 17 章 README + 2 篇深入长文；精读 <code>codexlib.py</code> 与 5 章 <code>code.py</code>；离线运行全部 17 章 <code>--demo</code>（17/17 退出码 0，含 macOS 上真实的内核沙箱拦截）；审计交叉引用 / 链接 / HTML 产物。 立场：挑刺。目标是找出「这个仓库与高 star 之间还差什么」。</blockquote>
+<hr>
+<h2 id="一句话结论">一句话结论</h2>
+<p><strong>vs learn-claude-code，这是一个「思想讲解水准已经追平甚至局部超越标杆、但成色被一批低级链接/编号瑕疵和单语言+无图的工程短板拖住」的项目。</strong> 核心教学内容已经是同类里的第一梯队；离「高 star」只差一轮<strong>打磨</strong>和几项<strong>分发层面的投入</strong>（多语言、图、可发现性）。</p>
+<p><strong>总分：82 / 100。</strong></p>
+<hr>
+<h2 id="各维度评分">各维度评分</h2>
+<h3 id="1-思想清晰度-95-10">1. 思想清晰度 —— 9.5 / 10</h3>
+<p>这是本仓库最强的一项，已经<strong>超过</strong>标杆的平均水准。每章开头的「先把思想说透」不是术语清单，而是真正的「推理 + 类比」教学：</p>
+<ul><li><strong>s03 apply_patch</strong> 用「让粗心朋友夹书签：说『第 213 页』会翻错，说『夹在「从前有座山」和「山里有座庙」中间』一找一个准」解释为什么补丁靠上下文锚定而非行号（s03 README 第 26 行）——这是把「LLM 数不准行号」这个抽象事实变得肉眼可懂的范例。</li><li><strong>s05 sandbox</strong> 的三层递进（「门里看门看不住」→「把执法点搬到进程够不着的内核」→「默认全拒、失败方向是安全的」）配合「门卫会被花言巧语骗过，物理门锁不会」（s05 第 18 行）——把「应用层挡 vs 内核层关」讲透。</li><li><strong>s10 SQ/EQ</strong> 从一个具体的「做不到」出发（同步函数调用里无法在「想跑」和「跑了」之间插入审批），一步步逼出双队列，再用「门铃 + 对讲机 vs 自动门」收束（s10 第 74 行）。</li><li><strong>s02</strong> 的「电话簿 / 公司前台转接」、<strong>s06</strong> 的「法律分层：宪法→省条例→市细则」、<strong>s09</strong> 的「麦当劳和星巴克的点单格式不同」、<strong>s15</strong> 的「USB-C 把 N×M 塌缩成 N+M」——几乎每章都有一个<strong>贴切且自洽</strong>的核心类比。</li></ul>
+<p>「走一遍」环节同样扎实：它用的是 <code>--demo</code> 真实跑出来的数据（我逐一核对过，例如 s16 的 provenance 表、s03 的 poem.txt 前后内容、s05 的 <code>Operation not permitted</code>，README 里写的和实际输出完全一致）。</p>
+<p>扣 0.5 的唯一理由：极少数章节（s11、s15）「先把思想说透」偏长，三个道理之间略有重复，初学者可能在进入「问题」前就已疲劳。</p>
+<h3 id="2-完整性与覆盖-8-10">2. 完整性与覆盖 —— 8 / 10</h3>
+<p>17 章覆盖了 Codex 区别于 Claude Code 的<strong>全部招牌设计</strong>：apply_patch、内核沙箱、审批策略、AGENTS.md、Rollout、Responses API、SQ/EQ、多前端、Guardian、MCP 双向、Config/Profile。选题精准，每个 ⭐ 章都打在 Codex 真正独特的地方。覆盖面对「理解 Codex 架构」这个目标是<strong>充分</strong>的。</p>
+<p>但有真实的覆盖缺口：</p>
+<ul><li><strong>多智能体 / 子代理只活在长文里，没有章节。</strong> 这是最大的结构性缺口。<code>agent-graph-store</code>、<code>agent-identity</code>、<code>InterAgentCommunication</code>、Review 模式、cloud-tasks 这些 Codex 极有特色的东西，只在 <code>docs/subagent-multiagent-cc-vs-codex.md</code> 里讲，没有对应的 <code>code.py</code> 可跑章节。标杆 learn-claude-code 专门有 s15/s16/s17 三章讲 agent teams——本仓库把对标内容降级成了一篇阅读材料。对一个想「理解 Codex」的人，这是缺了一块可动手的拼图。</li><li><strong>错误恢复 / 重试</strong> 没有独立成章（标杆有 s11 Error Recovery）。Codex 的 <code>responses_retry.rs</code>、粘性路由、reactive 压缩重试散落在 s07/s09 的 <code>&lt;details&gt;</code> 里，没有集中讲。</li><li><strong>没有一处总览图/索引把「真源码 crate ↔ 章节」对应起来</strong>（s17 的表是「流水线工位 ↔ 章节」，但读者想反查「<code>apply-patch</code> crate 在哪章」时没有入口）。</li></ul>
+<p>冗余方面基本没有问题：s02 和 s12 都讲「加工具循环不变」，但 s12 明确把重心移到「可观测事件」，不算重复。</p>
+<h3 id="3-递进与教学法-85-10">3. 递进与教学法 —— 8.5 / 10</h3>
+<p>6 部分的编排（给手+缰绳 → 脑子 → 引擎盖 → 前端扩展 → 进阶 → 收尾）是合理的，且<strong>有意识地借鉴</strong>了标杆的「能力→控制→由内向外→集成→综合」哲学（根 README 第 77 行明说）。难度大体单调爬升，章与章之间有真实的「钩子」（每章结尾「下一站」+ 开头「承接上一章」），s17 的「整门课其实只是一条流水线」收尾非常有力——把 16 章重新组织成「请求穿过一道道关卡，模型只占其中一步」，是点睛之笔。</p>
+<p>但递进有两处可议：</p>
+<ul><li><strong>s07（上下文压缩，标为 ≈）夹在两个 ⭐ 重章 s06 和 s08 之间，且它依赖的 s09（Responses API）/ rollout 概念其实排在它后面。</strong> s07 里大量出现「reasoning 占预算」「服务端压缩」这些要到 s08/s09 才讲清的概念。把「模型怎么被调用」（s09）放在「上下文怎么被压」（s07）之后，是一个可争议的顺序——读者在 s07 会遇到尚未建立的概念。</li><li><strong>Part 3「掀开引擎盖」（s09 协议 / s10 架构）位置偏后。</strong> Responses API 的 item 形状其实从 s01 就在用（<code>function_call</code> / <code>function_call_output</code>），却到第 9 章才解释。前 8 章一直让读者「先用着、第 9 章再懂」，虽然每章都注明「详见 s09」，但对追求「先理解再使用」的初学者是一种持续的小欠账。</li></ul>
+<h3 id="4-可跑性与忠于源码-9-10">4. 可跑性与忠于源码 —— 9 / 10</h3>
+<p><strong>这是仅次于「思想清晰度」的强项，也是本仓库最硬的信誉资产。</strong></p>
+<ul><li><strong>17/17 章 <code>--demo</code> 全部退出码 0，全程离线、无需 key。</strong> mock 后端设计干净（<code>codexlib.py</code> 的双后端抽象合理）。</li><li><strong>s05 在 macOS 上真实触发内核沙箱</strong>：demo 实际跑出 <code>touch: /Users/.../codex_escape_test.txt: Operation not permitted</code> 且事后断言文件不存在。这不是「假装」——它真的调 <code>/usr/bin/sandbox-exec</code>、真的被内核拒绝。对一个教学仓库，这种「真的能拦住」极大增强可信度。</li><li><strong>源码引用精确到文件+行号</strong>，且我抽查属实：<code>protocol.rs:760</code> 的 <code>AskForApproval</code> 枚举、<code>seatbelt.rs:602</code> 的 <code>create_seatbelt_command_args</code>、<code>GuardianRiskLevel</code>（<code>approvals.rs:85</code>）、<code>MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN = 3</code>（s14 熔断器）、<code>DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD = 100</code>（s15）……这些不是泛泛而谈，是真的去读了 <code>codex-rs</code>。「教学版 vs 真源码」的 <code>&lt;details&gt;</code> 对照表是本仓库相对一切同类「换皮教程」的核心差异化。</li><li>代码与 README 一致：我核对了 s03（<code>_find_block</code> 的 old/new 列表、demo 补丁）、s10（<code>decision = yield ev(...)</code> 的生成器机制），README 描述的算法和代码逐行吻合，没有发现「README 说一套、代码做另一套」的情况。</li></ul>
+<p>扣 1 分的真实理由：</p>
+<ul><li><strong>s05 的 demo 不自清理</strong>——它留下 <code>sandbox_demo/</code> 目录（README 第 178/197 行让用户手动 <code>rm -rf sandbox_demo</code>），而其余 16 章都用 <code>_demo_workspace/</code> 并自动 <code>rmtree</code>。这是一处可见的不一致（我在评审中手动清掉了它）。</li><li>忠实度的「天花板」是单文件简化，这本身没问题且被诚实标注；但 s03 的 <code>_find_block</code> 只做精确匹配，README 在正文里说「即便数错行号也能贴上」，严格说精确匹配对<strong>缩进</strong>误差并不鲁棒（README 在 <code>&lt;details&gt;</code> 里有补充说明 seek_sequence，但正文的措辞略微夸大了教学版的鲁棒性）。</li></ul>
+<h3 id="5-对比深度-9-10">5. 🆚 对比深度 —— 9 / 10</h3>
+<p>对比是本仓库的灵魂，也做得相当好。根 README 的 🆚 总表（10 行，每行带「为什么不同」）+「把为什么收成一句话」（Codex 押自主 / CC 押协作，且模型差异决定工具差异）立住了贯穿全书的主线，每章的「🆚 与 Claude Code 的不同」都把这条主线落到具体机制上，<strong>且不回避「这一章两家其实差不多」</strong>（s01/s02/s07/s12/s13 诚实地标 ≈，并解释「趋同恰恰说明这是通用最优解」）——这种克制让对比可信，不是为了对比而强行制造差异。</p>
+<p>两篇长文（context、subagent/multiagent）的对比深度尤其突出：context 篇从「上下文窗口是什么」讲到 prefix-cache 哲学、服务端 vs 客户端压缩、rollout 解耦，且<strong>双向</strong>都给了真源码依据（CC 侧引 <code>compact.ts</code>/<code>autoCompact.ts</code>，Codex 侧引 <code>compact.rs</code>/<code>compact_remote.rs</code>）。</p>
+<p>扣 1 分：CC 侧的论据<strong>强度不对称</strong>。Codex 侧处处有 <code>codex-rs</code> 的文件+行号；CC 侧则是「learn-claude-code 对其源码的剖析」——是二手的、且 CC 闭源无法独立验证。长文里若干关于 CC 的精确数字（「保头 3 条」「5 文件×5K/50K 预算」「15 种消息类型」「轮询 Lead 1s / 队友 500ms」）读起来很确定，但读者无从核实，存在「把对二手材料的转述呈现得过于确凿」的风险。至少应注明这些 CC 细节的确定性低于 Codex 侧。</p>
+<h3 id="6-一致性与打磨-6-10">6. 一致性与打磨 —— 6 / 10</h3>
+<p><strong>这是拉低总分的主要短板，且几乎全部是「廉价可修」的低级瑕疵——正因为可修，它们才尤其刺眼。</strong></p>
+<p>确凿的问题（均经 grep + 读 HTML 产物核实）：</p>
+<ol><li><strong>大量「引用式链接」从未定义，在渲染后变成肉眼可见的裸文本 <code>[s04]</code>。</strong> s14 的 <code>index.html</code> 里字面出现 9 次 <code>[s04]</code>、2 次 <code>[s05]</code>、各 1 次 <code>[s10]/[s15]</code>——它们不是可点链接，而是噪声文本。受影响章节：<strong>s14（14 处）、s04（9 处）、s13（8 处）</strong>。例：s13 第 164 行「与<strong>审批策略（[s04]）/ Guardian（[s14]）/ 事件协议（[s10]）</strong>同一套」——三个本应是链接的标记全裸露。对照之下 s03、s01 等章节<strong>正确地</strong>在文末定义了 <code>[s04]: ../s04_approval/</code>。这是「有的章定义了、有的章忘了定义」的不一致，是整个评审里<strong>性价比最高的待修项</strong>。</li></ol>
+<ol><li><strong>两篇长文用了过时的章节编号，会把读者导向错误章节。</strong> <code>docs/context-cc-vs-codex.md</code> 第 38-43、276 行写「s06 Responses API」「s08 AGENTS.md」「s09 上下文压缩」「s10 Rollout」「s06/s07 协议」——但真实映射是 Responses=<strong>s09</strong>、AGENTS=<strong>s06</strong>、压缩=<strong>s07</strong>、Rollout=<strong>s08</strong>。即长文里<strong>每一个</strong>章节指引都是错的（疑似沿用了重排前的旧编号）。读者按图索骥会全部走错。</li></ol>
+<ol><li><strong>线性阅读链有断点。</strong> 根 README 宣称按 s01→s17 顺序读，但 <code>s08_rollout</code> 的「下一站」直接跳到 <strong>s11</strong>（跳过了紧随其后的 s09 Responses、s10 SQ/EQ）。s08 第 252 行：「下一站 [s11 前端：TUI + exec]」。这与「难度单调爬升、逐章承接」的承诺矛盾，也和其它章规规矩矩指向 n+1 的做法不一致。</li></ol>
+<ol><li><strong>forward-link 风格不统一</strong>：s07 的前向引用藏在「小结」里（指向 s08），而非像其它章那样有独立的「下一站」收尾句——小瑕疵，但破坏了「每章结构同构」的观感。</li></ol>
+<p>正面的一面：HTML 产物本身质量不错（18 个 <code>index.html</code>，13–34 KB，表格/代码块/<code>&lt;details&gt;</code> 折叠/引用式链接都正确渲染，<code>build_html.py</code> 是零依赖纯 Python 解析器，本身也是个小教学样本）；术语、格言体例、文件命名（<code>sNN_topic/</code>）高度统一；正文没有残留 TODO/占位（grep 出的几处都是合法的示例文本或对 CC 占位符的准确描述）。<strong>问题不在「写得乱」，而在「最后一公里的链接/编号校对没做」。</strong></p>
+<h3 id="7-独特价值-会不会有人-star-75-10">7. 独特价值 / 会不会有人 star —— 7.5 / 10</h3>
+<p><strong>独特价值是真实存在的，而且不小：</strong> 目前公开生态里，「用可跑的 Python 从零讲清 OpenAI Codex（Rust）内部架构、且每章对照真源码行号、还逐章和 Claude Code 对比」——这个组合<strong>几乎没有第二家</strong>。learn-claude-code 已证明「从零复刻 + 讲思想」这个品类能拿高 star；本仓库是该品类在 Codex 方向的、质量对标的延伸，且「双系统对比」是它<strong>超出</strong>单纯复刻的增量价值。<code>gpt-5-codex</code> / Codex 的关注度在涨，选题踩在风口上。</p>
+<p>但「会不会真的 star 起来」目前被几个分发层面的短板压制：</p>
+<ul><li><strong>只有中文。</strong> 标杆是中/英/日三语。Codex 的受众高度国际化，无英文 README 直接砍掉绝大部分潜在 star 来源。这是从「好仓库」到「高 star 仓库」之间<strong>最大的单点障碍</strong>。</li><li><strong>几乎没有图。</strong> 标杆用 Mermaid 流程图 + SVG。本仓库通篇是 ASCII 框图——清晰，但在 GitHub 页面上「第一眼吸引力」远不如渲染出的彩图，README 的「截图友好度」低，不利于社交传播。</li><li><strong>可发现性弱</strong>：根 README 没有 badge、没有一句话英文 tagline、没有指向「在线可读 HTML」的托管链接（HTML 是本地生成的，没部署）。第 6 项的裸 <code>[s04]</code> 噪声也会让第一次点进章节的人觉得「未完成」。</li></ul>
+<p>换句话说：<strong>内容配得上高 star，包装还停在「自用」阶段。</strong></p>
+<hr>
+<h2 id="总分与结论">总分与结论</h2>
+<table><thead><tr><th>维度</th><th>权重直觉</th><th>得分</th></tr></thead><tbody><tr><td>1. 思想清晰度</td><td>旗舰</td><td>9.5</td></tr><tr><td>2. 完整性与覆盖</td><td>高</td><td>8.0</td></tr><tr><td>3. 递进与教学法</td><td>高</td><td>8.5</td></tr><tr><td>4. 可跑性与忠于源码</td><td>旗舰</td><td>9.0</td></tr><tr><td>5. 🆚 对比深度</td><td>高</td><td>9.0</td></tr><tr><td>6. 一致性与打磨</td><td>中</td><td>6.0</td></tr><tr><td>7. 独特价值 / star 潜力</td><td>高</td><td>7.5</td></tr></tbody></table>
+<p><strong>加权总分 ≈ 82 / 100。</strong></p>
+<p><strong>一句话定调：vs learn-claude-code，这是「内核教学已达标杆水准、但还穿着一身自用毛坯外壳」的项目——它差的不是「写得好不好」，而是「最后一轮校对 + 国际化 + 视觉/分发投入」。</strong></p>
+<hr>
+<h2 id="top-3-强项具体">Top 3 强项（具体）</h2>
+<ol><li><strong>「先把思想说透」的类比教学是同类天花板。</strong> apply_patch 的「书签 vs 页码」、sandbox 的「门卫会被骗、门锁不会」、SQ/EQ 的「门铃对讲机 vs 自动门」、MCP 的「N×M 塌缩成 N+M」——几乎每章都有一个能让近乎零基础者「啪一下想通」的核心比喻，而非术语堆砌。这是 learn-claude-code 的精髓，本仓库不仅学到了，局部还更细腻。</li></ol>
+<ol><li><strong>「真的能跑 + 真的对照源码」双重落地。</strong> 17/17 demo 离线退出码 0，s05 在真机上被内核当场拒绝越界写；每章 <code>&lt;details&gt;</code> 把教学版精确对到 <code>codex-rs</code> 的文件名+行号+常量名（<code>AskForApproval</code>/<code>GuardianRiskLevel</code>/<code>MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN=3</code>/<code>DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD=100</code>），抽查全部属实。这把它和「凭印象讲 Codex」的二手教程彻底拉开。</li></ol>
+<ol><li><strong>贯穿全书、且诚实的对比主线。</strong> 「Codex 押自主（内核沙箱/可审计 rollout/无头友好）、CC 押协作（交互审批/应用层把关）；而工具差异源于模型训练差异」这条线，从根 README 到每一章「🆚」再到两篇长文一以贯之，且在该说「两家其实差不多」时坦然标 ≈ 并解释趋同——克制让对比可信。</li></ol>
+<hr>
+<h2 id="优先级修订清单按迈向高-star的-roi-排序">优先级修订清单（按「迈向高 star」的 ROI 排序）</h2>
+<h3 id="p0-不修则不可信必须先做成本极低">P0 — 不修则不可信（必须先做，成本极低）</h3>
+<ul><li><strong>P0-1 修复所有裸 <code>[sNN]</code> 引用链接。</strong> 给 s04、s13、s14（共 ~31 处）在文末补上引用定义（如 <code>[s04]: ../s04_approval/</code>），或把它们直接改成内联链接 <code>[s04](../s04_approval/)</code>。判定标准：<code>grep -rE &#x27;\[s[0-9]{2}\][^(:]&#x27; s*/README.md</code> 后，每个被引用的 <code>[sNN]</code> 在该文件都能找到对应的 <code>^[sNN]:</code> 定义。这是整个仓库<strong>第一眼显得「未完成」的元凶</strong>，半小时可清。</li><li><strong>P0-2 修正两篇长文的过时章节编号。</strong> 把 <code>docs/context-cc-vs-codex.md</code>（第 38-43、276 行）与 subagent 篇里所有「s06 Responses / s08 AGENTS / s09 压缩 / s10 Rollout / s06-s07 协议」改成正确映射（Responses=s09、AGENTS=s06、压缩=s07、Rollout=s08、协议=s09/s10），并尽量改成可点链接而非纯文本编号。否则读者「按图索骥」必然走错章。</li><li><strong>P0-3 修复 s08 的断链「下一站」。</strong> <code>s08_rollout/README.md</code> 第 252 行的「下一站 → s11」应改为 → <strong>s09 Responses API</strong>（与实际线性顺序和「逐章爬升」承诺一致）；相应把 s08 结尾那段「rollout 记的命令怎么被执行」的过渡话术挪到 s11 或重写。</li></ul>
+<h3 id="p1-高杠杆决定-star-量级">P1 — 高杠杆（决定 star 量级）</h3>
+<ul><li><strong>P1-1 出英文版 README + 至少旗舰章（s01/s03/s05/s10/s14/s17）英译。</strong> 这是从「好仓库」到「高 star」之间最大的单点障碍。Codex 受众国际化，无英文等于自断流量。可分两批：先根 README + 6 个 ⭐ 章，再补全。</li><li><strong>P1-2 补一章可跑的「多智能体 / 子代理」。</strong> 把目前只存在于 <code>docs/subagent-multiagent-cc-vs-codex.md</code> 的内容升级成 <code>s18_multiagent/</code>（带 <code>code.py --demo</code>）：哪怕用进程内对象模拟 <code>InterAgentCommunication</code> + agent 图谱 + auto_review 子代理，也能补上对标 learn-claude-code s15-s17 的最大缺口，让「理解 Codex」这块拼图完整、可动手。</li><li><strong>P1-3 给旗舰章配渲染图。</strong> 至少根 README 的课程路线图、s05 沙箱的「deny default + 可写根」、s10 的 SQ/EQ 双队列、s17 的流水线，改成 Mermaid 或 SVG。GitHub 第一眼吸引力 + 社交传播图，ASCII 框图给不了。</li><li><strong>P1-4 部署 HTML 在线版并在根 README 顶部挂链接。</strong> <code>build_html.py</code> 已能产出完整站点，缺的只是 GitHub Pages 部署 + 一句「在线阅读」入口。让人不 clone 就能读，是 star 转化的关键。</li></ul>
+<h3 id="p2-打磨提升留存与口碑">P2 — 打磨（提升留存与口碑）</h3>
+<ul><li><strong>P2-1 统一 demo 清理行为。</strong> 让 s05 的 demo 像其它章一样用临时目录并自动 <code>rmtree</code>（或至少在 demo 末尾自清 <code>sandbox_demo/</code>），消除「16 章自清、1 章要你手动删」的不一致。</li><li><strong>P2-2 给两篇长文的 CC 侧论据加「确定性标注」。</strong> 凡 CC 的精确数字（保头 3、5×5K/50K、15 种消息类型、轮询 1s/500ms）注明「源自对 learn-claude-code 的转述，闭源无法独立验证」，避免把二手材料呈现得与 Codex 侧一手源码同等确凿。</li><li><strong>P2-3 校准 s03 正文对鲁棒性的措辞。</strong> 正文说「即便数错行号也能贴上」，但教学版 <code>_find_block</code> 仅精确匹配（对缩进误差不鲁棒）；把「容忍误差」更明确地限定为「容忍行号漂移，但需上下文逐字一致；模糊匹配见 <code>&lt;details&gt;</code>」。</li><li><strong>P2-4 统一「下一站」体例。</strong> 让每章都有一句独立的「下一站 → sNN」收尾（s07 目前藏在小结里），保持 17 章结构同构。</li><li><strong>P2-5 加一张「真源码 crate ↔ 章节」反查表</strong>（放根 README 或 s17），让想从 <code>codex-rs</code> 某个 crate 反查「在哪章讲」的读者有入口。</li><li><strong>P2-6 README 顶部加英文 tagline + badge + 一行「与 learn-claude-code 的关系」</strong>，提升可发现性与「这是什么」的 3 秒判断。</li></ul>
+<hr>
+<p><em>评审完毕。核心判断：内容已是高 star 体质，P0 三项（裸链接、长文错号、s08 断链）必须先清以恢复「成品感」，P1 四项（英文、多智能体章、图、在线版）决定它最终能涨到多高。</em></p>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

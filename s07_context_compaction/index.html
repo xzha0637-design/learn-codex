@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s07: Context Compaction — 对话太长就把旧回合压成一句摘要</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s07-context-compaction-对话太长就把旧回合压成一句摘要">s07: Context Compaction — 对话太长就把旧回合压成一句摘要</h1>
+<blockquote><em>&quot;上下文窗口是有限的；与其撞墙，不如把走过的路压成一张地图。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s06_agents_md/index.html">s06 AGENTS.md</a> → <strong>s07</strong> → <a href="../s08_rollout/index.html">s08 Rollout 续接</a></p>
+<hr>
+<h2 id="先把思想说透上下文是有限的所以要先用便宜招最后才动用模型">先把思想说透：上下文是有限的，所以要「先用便宜招、最后才动用模型」</h2>
+<p>每次找模型说话，你都得把「到目前为止发生过的全部对话」重新打包发过去——模型自己不记事，全靠你每回把历史一并喂给它。问题来了：这坨历史会越堆越大，而模型一次能吃下的量是<strong>有上限</strong>的。这一章就是在回答一个很现实的问题：<strong>历史装不下了，怎么办？</strong> 想通下面三层，你就抓住了它的全部巧思。</p>
+<p><strong>道理一：模型的「记忆」其实是你每次重发的那一坨历史，而它有一道物理天花板。</strong> 你可以把和模型的每一次通话想象成「把一摞纸塞进一个固定大小的信封」——这摞纸就是迄今为止的所有对话，信封大小就是模型一次能读的上限。纸越堆越厚：读个文件、跑条命令、看段输出，每一步都往里加几张。塞不下了会发生两件坏事：要么直接撑爆、报错、整个回合崩掉；要么勉强塞进去，但模型被几十页陈年细节淹没，反而越看越糊涂。所以「历史无限增长」和「信封大小固定」这对矛盾，迟早要正面解决。</p>
+<p><strong>道理二：最笨的解法是「把最旧的纸直接扔掉」，但那会扔掉关键决策——真正要的是「浓缩」而不是「丢弃」。</strong> 最省事的想法是：满了就把最早那几张纸撕掉。可那几张纸上可能写着「我们权衡后决定用方案 B、放弃了 A」——撕掉之后模型一回头就失忆，又开始纠结早就拍板的事。所以聪明的做法不是扔，而是<strong>浓缩</strong>：把一长段啰嗦的旧过程，换成一小段精炼的「交接摘要」。这正像你交接工作时，绝不会把三个月的聊天记录原样甩给接手人，而是写一页纸——「现在进度到哪、做过哪些决定、还差什么」。原文没了，但<strong>要点还在</strong>。这就是「压缩」两个字的真意：用一句话顶替掉一大段，把信封重新腾空。</p>
+<p><strong>道理三（最关键）：浓缩要花钱，所以顺序是「先用便宜的招数，逼不得已才动用最贵的那一招」。</strong> 怎么把一大段对话浓缩成一句话？最聪明、最准的办法是<strong>再请模型读一遍、让它自己写摘要</strong>——但这等于额外多打一次电话，又慢又费钱。所以真正的工程智慧不在「会压缩」，而在<strong>省着用这一招</strong>：能用便宜手段腾地方，就绝不轻易惊动模型。于是有了一条由便宜到昂贵的阶梯——先把又臭又长的工具输出<strong>就地截短</strong>（几乎不要钱），最近的细节<strong>原样留着</strong>（白送），实在不够了，才把最旧的一大段<strong>交给模型总结</strong>（最贵、放最后）。本章离线演示时，连「请模型」这步都用一段确定性的拼接规则替身，但顺序的精神一模一样：<strong>廉价的截断在前，昂贵的模型摘要垫底。</strong></p>
+<p>还有一个让你能安心压缩的底气：<strong>被压掉的东西并没有真正消失</strong>。喂给模型的这份历史只是「当下要用的工作副本」，可以随便修剪；与此同时，完整、一字不漏的原始记录另有一份落在磁盘上（就是下一章 <a href="../s08_rollout/index.html">s08</a> 的 rollout）。正因为「省钱的副本」和「保全的底稿」是两码事，你才敢放手把工作副本压短——天塌不下来。</p>
+<p>把这四点连起来：信封有上限 → 不能扔只能浓缩 → 浓缩按「便宜在前、模型摘要垫底」的顺序 → 而且压的只是工作副本、原件另存。这就是上下文压缩的全部思想。</p>
+<h2 id="问题">问题</h2>
+<p>agent 干一件复杂的活，往往要几十个来回：读文件、跑命令、看输出、再改、再跑……每一步都往对话历史里堆消息和工具输出。可模型的<strong>上下文窗口是有限的</strong>——堆到一定程度，要么直接报「context window exceeded」、回合崩掉，要么虽然没崩，但模型被海量陈年细节淹没、越来越不准。</p>
+<p>最朴素的办法是「丢掉最旧的消息」。但这会丢掉关键决策（「我们之前决定用方案 B 而不是 A」），模型一回头就失忆。</p>
+<p>真正要的是：<strong>在不超窗口的前提下，尽量保住「已经发生过什么、做了哪些决定、还剩什么没做」</strong>——把冗长的中间过程压成一段精炼的交接摘要，把最近的细节原样留着。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>当消息列表超过预算（本章用<strong>总字符数</strong>当 token 的廉价代理），就触发压缩：</p>
+<ol><li>把列表切成「最旧的一批」和「最近的 N 个」；</li><li>把最旧的一批交给模型（离线时用确定性启发式）总结成<strong>一条</strong> <code>[summary]</code> 消息；</li><li>新历史 = <code>[摘要]</code> + <code>[最近 N 个 item]</code>。</li></ol>
+<pre><code>   压缩前（超预算）                      压缩后（回到预算内）
+   ┌─────────────────────┐             ┌─────────────────────┐
+   │ user  第1步…         │  ┐          │ [summary] 压了最早    │
+   │ tool_call shell      │  │ 最旧      │   13 项，要点回顾：    │ ← 一条摘要
+   │ tool_result …(长)    │  │ 一批      │   - 第1步 列目录       │
+   │ user  第2步…         │  │ 压成      │   - 第2步 读 README   │
+   │ …（共 13 项）        │  ┘ 摘要      │   - …                 │
+   │ user  第5步…         │  ┐          ├─────────────────────┤
+   │ tool_call shell      │  │ 最近      │ user  第5步…          │
+   │ tool_result …        │  │ 6 项      │ tool_call shell       │ ← 原样保留
+   │ …                    │  │ 原样      │ tool_result …         │
+   │ user  请总结一下      │  ┘ 保留      │ user  请总结一下       │
+   └─────────────────────┘             └─────────────────────┘
+        19 项                                 1 + 6 = 7 项</code></pre>
+<p>摘要本身被编码成一条 <code>user</code> 消息（这点和真源码一致），靠一个前缀（教学版 <code>[summary]</code>，真源码 <code>SUMMARY_PREFIX</code>）标记身份，方便后续识别、避免被二次压缩。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>：</p>
+<p><strong>触发</strong> — <code>total_chars(messages)</code> 把所有可见文本（含工具参数/输出）字符数相加，当作 token 用量代理；超过 <code>BUDGET_CHARS</code> 就压：</p>
+<pre><code class="language-python">def compact(messages, model=None):
+    if total_chars(messages) &lt;= BUDGET_CHARS or len(messages) &lt;= KEEP_RECENT:
+        return messages                       # 没超预算，原样返回
+    split = len(messages) - KEEP_RECENT
+    old, recent = messages[:split], messages[split:]
+    summary_item = user_item(summarize(old, model))   # 旧回合 → 一条摘要
+    return [summary_item, *recent]            # 摘要 + 最近 N 项</code></pre>
+<p><strong>摘要</strong> — <code>summarize</code> 离线时走确定性启发式：把每个旧 item 用 <code>item_text</code> 压成一行（用户消息截断、工具调用只留名、工具输出大幅裁短），再拼成一段「要点回顾」。真源码这里是把旧历史发给模型、用 <code>SUMMARIZATION_PROMPT</code> 让它产出 handoff 摘要——但机制骨架一样：<strong>旧的多条 → 新的一条</strong>。</p>
+<p><strong>接进回合</strong> — <code>run_turn</code> 在每回合开始前先 <code>compact()</code> 一次（proactive 压缩），打印 <code>before → after</code> 的项数变化。</p>
+<p>这对应真源码 <a href="../../codex/codex-rs/core/src/compact.rs"><code>core/src/compact.rs</code></a>：<code>build_compacted_history</code> 组装「近期用户消息 + 摘要」的新历史，<code>SUMMARY_PREFIX</code> 标记摘要，<code>is_summary_message</code> 做前缀识别。触发分两路：<strong>proactive</strong>（<code>session/turn.rs</code> 里 <code>token_limit_reached</code> 时调 <code>run_auto_compact</code>）和 <strong>reactive</strong>（<code>compact.rs</code> 主循环命中 <code>CodexErr::ContextWindowExceeded</code> 时，从头移除最旧 item 再重试）。此外还有两个<strong>服务端</strong>压缩变体 <a href="../../codex/codex-rs/core/src/compact_remote.rs"><code>compact_remote.rs</code></a> 与 <a href="../../codex/codex-rs/core/src/compact_remote_v2.rs"><code>compact_remote_v2.rs</code></a>。</p>
+<p><code>--demo</code> 直接演示：造一段约 20 项的假对话，用很小的预算触发压缩，打印 before/after 项数 + 产出的摘要（离线、确定性、无需模型）。</p>
+<p><strong>走一遍</strong> —— 跟着 <code>--demo</code> 的一次真实压缩，看每一步数据长什么样、为什么这么做：</p>
+<ol><li><strong>造一段长对话。</strong> <code>build_long_conversation()</code> 造出 19 个 item：6 轮「用户问 → 工具调用 → 工具结果」再加一句收尾。前几项长这样：</li></ol>
+<pre><code>   user:         第1步：请列出目录。
+   function_call: shell  {&quot;command&quot;: &quot;do-列出目录&quot;}
+   function_call_output: 列出目录 的输出 xxxxxxxx…(故意撑到 40 个 x，模拟冗长输出)
+   user:         第2步：请读 README。
+   …（如此 6 轮）…
+   user:         好的，最后请帮我总结一下我们刚才做了哪些事。</code></pre>
+<ol><li><strong>算账，发现超预算。</strong> <code>total_chars(messages)</code> 把所有可见文本字符相加 = <strong>532 字符</strong>，而 <code>BUDGET_CHARS = 400</code>。532 &gt; 400 → 触发压缩。<em>为什么</em>：这就是「快撑爆窗口」的模拟——真源码这里换成「估算的 token 数接近窗口上限」。</li></ol>
+<ol><li><strong>切两段。</strong> <code>KEEP_RECENT = 6</code>，所以 <code>split = 19 - 6 = 13</code>：最旧的 <strong>13 项</strong>要被压，最近的 <strong>6 项</strong>原样保留。<em>为什么</em>留最近的：刚发生的细节对「接着干」最有用，旧的过程才是可以浓缩的。</li></ol>
+<ol><li><strong>把旧的 13 项压成一条摘要。</strong> <code>summarize(old)</code> 把每项压成一行（用户消息截断、工具调用只留名 <code>shell</code>、工具输出大幅裁短），拼成一条带 <code>[summary]</code> 前缀的消息：</li></ol>
+<pre><code>   [summary] 压缩了最早的 13 个对话项；要点回顾：
+     - user: 第1步：请列出目录。
+     - tool_call: shell
+     - tool_result: 列出目录 的输出 xxxxxxxxxxxxxxx…
+     - user: 第2步：请读 README。
+     - …
+     - user: 第5步：请看依赖版本。</code></pre>
+<p>   <em>为什么</em>工具输出被砍得最狠：回顾时只需知道「跑过、大致结果」，那 40 个 x 没有保留价值。</p>
+<ol><li><strong>拼出新历史。</strong> <code>[摘要] + 最近 6 项</code> = <strong>7 项</strong>。19 → 7，对话被压回了预算量级，但「做过哪些事」靠摘要还在、最近的上下文一字未动。demo 最后断言 <code>首项是摘要 且 总项数 == 1 + 6</code>，校验通过。</li></ol>
+<blockquote>一个细节：压缩后字符数可能不降反升（demo 里 532 → 575），因为这段假对话每项都很短，而摘要把 13 项的要点都列了出来。真实场景里被压的是<strong>又多又长</strong>的工具输出，摘要再啰嗦也远比原文短——这里只是项数少、字符省不明显，不影响机制演示。</blockquote>
+<h2 id="生产级估算会失准reactive-压缩是最后一道闸">生产级：估算会失准——reactive 压缩是最后一道闸</h2>
+<p>proactive 压缩靠<strong>估算</strong>（字符数代理 token）决定何时压。可估算永远会失准：不同 tokenizer、reasoning 占的预算、工具输出的突发膨胀……总有一刻你以为没超、实际却<strong>撞了模型的硬上限</strong>。这时原样重发只会再撞一次。生产级必须有一条 <strong>reactive（被动）兜底</strong>：真撞上 <code>ContextWindowExceeded</code>，就<strong>从头删最旧一项、重试</strong>，直到放得下。对应 <a href="../../codex/codex-rs/core/src/compact.rs"><code>compact.rs</code></a> 主循环的 <code>history.remove_first_item()</code> + <code>retries = 0</code> 重试。</p>
+<p>本章 <code>--demo</code> 演示了这条：proactive 以为没事，但模型硬上限更紧（约 12 项），撞墙后自动逐项裁剪重试：</p>
+<pre><code>proactive 以为没事，但模型硬上限约 12 项——撞墙后自动从头删项重试：
+  ⚠ ContextWindowExceeded → 删最旧一项（user: 第1步：请列出目录。…），剩 18 项后重试
+  ⚠ ContextWindowExceeded → 删最旧一项（tool_call: shell…），剩 17 项后重试
+  ...
+  → ok：12 项放下了，回合成功</code></pre>
+<p>两路缺一不可：<strong>proactive 省钱</strong>（趁早压、少烧 token），<strong>reactive 保命</strong>（估错了也不至于整轮失败）。一个是优化、一个是正确性兜底——真 Codex 两者并存（turn.rs 的 <code>run_auto_compact</code> + compact.rs 的撞墙重试），不是二选一。</p>
+<blockquote>还有一处生产级细节：删的是<strong>最旧</strong>的项而非随机删，因为最近的上下文对&quot;接着干&quot;最值钱；而被压掉的完整历史并没丢——它仍在 rollout（<a href="../s08_rollout/index.html">s08</a>）里，可回放可审计。压缩省的是<strong>上下文窗口</strong>，不是<strong>底稿</strong>。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<p>压缩这件事两边<strong>很像</strong>（≈）——都把历史总结成摘要以适配上下文：</p>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>核心思路</td><td>摘要旧历史以适配窗口（≈）</td><td>摘要旧历史以适配窗口（≈）</td></tr><tr><td>触发</td><td>接近窗口上限时压缩（proactive + reactive 重试）</td><td>同样 proactive（token 上限）+ reactive（<code>ContextWindowExceeded</code>）</td></tr><tr><td>压缩在哪跑</td><td><strong>客户端/本地</strong></td><td>本地 <strong>＋ 服务端</strong>（<code>compact_remote</code> / <code>compact_remote_v2</code>）</td></tr><tr><td>摘要载体</td><td>摘要消息</td><td>一条 <code>user</code> 角色摘要消息（<code>SUMMARY_PREFIX</code> 前缀）</td></tr><tr><td>与完整记录的关系</td><td>—</td><td>压缩只改「活动历史」，完整历史另由 rollout（<a href="../s08_rollout/index.html">s08</a>）落盘</td></tr></tbody></table>
+<p><strong>为什么 Codex 多一条服务端压缩？</strong> 还是那条主线：Codex 为 <strong>headless / CI / 云端</strong>自主运行下注。云端的 Codex agent 可以让<strong>服务端</strong>直接对会话做压缩（<code>compact_remote</code>，乃至带 rollout trace 的 <code>compact_remote_v2</code>），客户端只需消费结果——这对长时间无人值守的云任务更省、更稳。而本地的 <code>run_inline_auto_compact_task</code> 作为<strong>兜底</strong>：当 provider 不支持远程压缩（<code>should_use_remote_compact_task</code> 为假）时就走本地。Claude Code 以本地交互式为中心，把压缩放在客户端已经够用，没有「服务端替你压」这一路。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<details>
+<summary>一、触发：proactive 主动压 vs reactive 撞墙后压</summary>
+<p>教学版只有一种触发：每回合开始前 <code>total_chars &gt; BUDGET_CHARS</code> 就压（proactive）。真源码两路并存：</p>
+<table><thead><tr><th>路径</th><th>触发点</th><th>真源码</th></tr></thead><tbody><tr><td><strong>Proactive（主动）</strong></td><td>估算 token 接近 <code>model_auto_compact_token_limit</code></td><td><code>session/turn.rs</code>：<code>token_limit_reached &amp;&amp; needs_follow_up</code> → <code>run_auto_compact(...)</code></td></tr><tr><td><strong>Reactive（被动）</strong></td><td>真的撞上 <code>CodexErr::ContextWindowExceeded</code></td><td><code>compact.rs</code> 主循环：<code>history.remove_first_item()</code> 从头删一项、<code>retries = 0</code> 重试</td></tr></tbody></table>
+<p>reactive 这一路很关键：即使估算失准、真把窗口撑爆了，也不是直接崩——而是<strong>从最前面（最旧）逐项删除</strong>再重试。从前面删是为了<strong>保住前缀缓存</strong>（prefix cache）：模型 API 的缓存按前缀命中，保留靠后的近期消息更划算。教学版的字符代理只是「token 估算」的极简版，真源码的 token 计量要精细得多（区分 scope、window ordinal、prefill 等）。</p>
+</details>
+<details>
+<summary>二、压缩后保留什么：近期用户消息 + 摘要，工具输出被裁</summary>
+<p>教学版新历史 = <code>[摘要] + 最近 KEEP_RECENT 项</code>。真源码 <code>build_compacted_history</code> 更讲究：</p>
+<pre><code class="language-rust">// compact.rs：新历史 = [初始上下文] + [近期 user 消息（按 token 预算从后往前选）] + [摘要]
+let mut new_history = build_compacted_history(Vec::new(), &amp;user_messages, &amp;summary_text);</code></pre>
+<ul><li><strong>只保「真实用户消息」</strong>：<code>collect_user_messages</code> 过滤掉摘要消息本身（<code>is_summary_message</code>），避免摘要套摘要。</li><li><strong>按 token 预算从后往前选</strong>：<code>COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000</code>，从最近的用户消息往回收，超预算就 <code>truncate_text</code> 裁断。</li><li><strong>初始上下文重新注入</strong>：压缩会清掉历史，于是用 <code>InitialContextInjection</code> 决定是否把「初始上下文」（环境、AGENTS.md 等）<strong>重新垫回</strong>。mid-turn 压缩用 <code>BeforeLastUserMessage</code>（垫在最后一条真实用户消息之前，因为模型被训练成「压缩摘要应是历史最后一项」）；手动/回合前压缩用 <code>DoNotInject</code>（下一个常规回合会自然重注入）。</li></ul>
+<p>教学版省掉了「初始上下文重注入」和「按 token 预算选用户消息」，但保留了最核心的「旧多条 → 摘要 + 近期项」骨架。</p>
+</details>
+<details>
+<summary>三、摘要怎么生成：SUMMARIZATION_PROMPT 与 SUMMARY_PREFIX</summary>
+<p>教学版 <code>summarize</code> 是确定性启发式（逐行拼接 + 截断），为的是<strong>离线、无需模型</strong>。真源码是让模型产出摘要：</p>
+<ul><li><code>SUMMARIZATION_PROMPT</code>（<code>prompts/templates/compact/prompt.md</code>）的指令是「你在做 CONTEXT CHECKPOINT COMPACTION，为接手的 LLM 写一份 handoff 摘要」，要求包含：当前进度与关键决策、重要约束/用户偏好、剩余待办、关键数据/引用。</li><li>摘要产出后，前面拼上 <code>SUMMARY_PREFIX</code>（<code>summary_prefix.md</code>，一段「另一个语言模型产出了它的思考摘要，请基于它继续、别重复劳动」的引导文本），再作为一条 <code>role=&quot;user&quot;</code> 的消息存进历史。</li></ul>
+<pre><code class="language-rust">let summary_suffix = get_last_assistant_message_from_turn(history_items).unwrap_or_default();
+let summary_text = format!(&quot;{SUMMARY_PREFIX}\n{summary_suffix}&quot;);</code></pre>
+<p>也就是说，压缩本身<strong>是一次真实的模型回合</strong>：把旧历史喂进去，让模型「输出一段摘要」，再用这段摘要替换历史。教学版用启发式替代这次回合调用，骨架（<code>SUMMARY_PREFIX</code> + 一条 user 消息）保持一致。</p>
+</details>
+<details>
+<summary>四、服务端压缩 remote / remote_v2 与本地的关系</summary>
+<p>教学版只有本地一路。真源码 <code>run_auto_compact</code>（<code>session/turn.rs</code>）是个<strong>三向分派器</strong>：</p>
+<table><thead><tr><th>条件</th><th>走哪条</th><th>实现</th></tr></thead><tbody><tr><td>provider 支持远程 + 开启 <code>RemoteCompactionV2</code></td><td>远程 v2</td><td><code>compact_remote_v2.rs::run_inline_remote_auto_compact_task</code></td></tr><tr><td>provider 支持远程（默认远程）</td><td>远程 v1</td><td><code>compact_remote.rs::run_inline_remote_auto_compact_task</code></td></tr><tr><td>provider 不支持远程</td><td><strong>本地兜底</strong></td><td><code>compact.rs::run_inline_auto_compact_task</code></td></tr></tbody></table>
+<p>判定靠 <code>should_use_remote_compact_task(provider)</code>（即 <code>provider.supports_remote_compaction()</code>）。远程压缩把「总结旧历史」这件事下沉到<strong>服务端</strong>完成，客户端拿回压缩好的历史；<code>compact_remote_v2</code> 还接入了 rollout trace（<code>CompactionCheckpointTracePayload</code>）做可观测。三条路共享同一套骨架函数（<code>insert_initial_context_before_last_real_user_or_summary</code>、<code>compaction_status_from_result</code>、pre/post-compact hooks），只是「摘要在哪算」不同。</p>
+<p>一句话：教学版 ~60 行的「超预算 → 旧的压成一条摘要 + 留近期项」，就是 <code>compact.rs</code>（600+ 行）的核心；其余都是 token 精算、初始上下文重注入、pre/post hooks、analytics，以及<strong>本地/远程 v1/远程 v2 三套实现</strong>。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s07_context_compaction/code.py --demo   # 造长对话演示压缩 before/after（mock，无需 key，摘要离线生成）
+python s07_context_compaction/code.py          # 交互模式：聊到超预算会自动压缩</code></pre>
+<p><code>--demo</code> 全程离线、不调用模型，摘要由确定性启发式生成，结束打印 <code>19 项 → 1 摘要 + 6 近期项 = 7 项</code> 的校验。</p>
+<h2 id="小结">小结</h2>
+<ul><li>上下文窗口有限：超预算就把<strong>最旧的一批回合</strong>压成一条 <code>[summary]</code> 摘要，保留最近 N 项。</li><li>触发两路：proactive（token 接近上限主动压）+ reactive（撞上 <code>ContextWindowExceeded</code> 从头删项重试）。</li><li>压缩本身是一次模型回合（产出 handoff 摘要）；保住的是「近期细节 + 关键决策」，冗长工具输出被裁。</li><li>Codex 与 Claude Code 的压缩思路≈，但 Codex 额外有<strong>服务端压缩</strong>（<code>compact_remote</code> / <code>_v2</code>），本地作兜底——为云端自主运行下注。</li><li>压缩只改「活动历史」；完整、未删减的历史另由 rollout 落盘，两者正交。</li><li><strong>生产级</strong>：proactive 估算会失准，必须有 reactive 兜底——真撞 <code>ContextWindowExceeded</code> 就从头删最旧项重试直到放下（见「生产级」一节）。两路缺一不可：proactive 省钱、reactive 保命。</li><li>下一站 <a href="../s08_rollout/index.html">s08 Rollout 续接</a>：压缩省的是 token、rollout 保的是全量底稿——连「压缩」这个动作本身都会被记进去，于是会话可续接、可回放。</li></ul>
+<h2 id="思考">思考</h2>
+<ul><li>压缩用「字符数 / token 估算」决定何时触发，但估算可能失准。Codex 的兜底是 reactive——真撞墙了再从头删项重试。如果是你，会更信任「提前主动压」还是「撞墙再补救」？两者的成本（多花一次模型回合 vs 一次失败重试）你怎么权衡？</li><li>摘要是模型自己写的——这意味着「记住什么、丢掉什么」由模型裁决。如果它在摘要里漏掉了一个关键决策（「我们放弃了方案 A」），后续回合会基于残缺记忆继续。你会怎么降低这种「摘要漏关键信息」的风险？</li><li>Codex 把压缩<strong>下沉到服务端</strong>（remote），客户端只消费结果。这省心，但也意味着「我的对话怎么被压、压成了什么」发生在你看不见的地方。对一个 headless 云任务，这种「服务端替你压」是该欢迎的便利，还是该警惕的黑箱？</li><li>压缩删减「活动历史」，而 rollout（s08）保留<strong>完整</strong>历史。既然完整记录都在，为什么不干脆每次都从完整历史里现算上下文，而要维护一个被压缩过的活动历史？「省钱省窗口」和「永不失忆」之间，这条边界你会画在哪？</li></ul>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s03: apply_patch — Codex 怎么改文件</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s03-apply_patch-codex-怎么改文件">s03: apply_patch — Codex 怎么改文件</h1>
+<blockquote><em>&quot;把&#x27;改动&#x27;表达成一个结构化补丁信封，一次调用增/改/删/移多个文件。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s02_tool_use/index.html">工具与分发</a> → <strong>apply_patch</strong> → <a href="../s04_approval/index.html">审批策略</a></p>
+<hr>
+<h2 id="先把思想说透为什么改文件要做成一封补丁信封">先把思想说透：为什么&quot;改文件&quot;要做成一封补丁信封</h2>
+<p>s02 已经给了模型一个 <code>write_file</code>，它能写任意文件——那&quot;改代码&quot;这件事看起来不就解决了吗？让模型把改好的整个文件重写一遍不就行了？真要这么做，你很快会撞上几堵墙。想通 Codex 为什么绕开这条路、走&quot;补丁信封&quot;，靠下面三个递进的道理。</p>
+<p><strong>道理一：直接覆盖整个文件，是在用大炮打蚊子，而且会误伤。</strong> 你只想把一个 800 行文件里的某一行 <code>timeout=30</code> 改成 <code>timeout=60</code>。如果走 <code>write_file</code>，模型得把这 800 行<strong>一字不差地重新吐一遍</strong>，只为改动其中一行。这有三重浪费和风险：吐 800 行又慢又费 token；模型在重抄那 799 行无关代码时，很可能手一抖改坏一处你没让它动的地方；而且事后你想知道&quot;它到底改了啥&quot;，得拿新旧两版整文件去 diff 才看得出来。<strong>改动越小，整文件覆盖的浪费和风险越离谱。</strong> 我们真正想要的，是只描述&quot;变化的那一点点&quot;，而不是把没变的也搬一遍。</p>
+<p><strong>道理二：那就只描述&quot;变化&quot;——而最自然的&quot;变化描述&quot;，是一封能装下多处改动的信封。</strong> 只说变化，办法之一是像 Claude Code 那样逐处替换（&quot;把这串旧的换成这串新的&quot;）。但真实的改代码常常是<strong>一组相互关联的改动</strong>：加一个新文件、改两个老文件、顺手删掉一个废弃文件——它们其实是&quot;同一件事&quot;。如果拆成五次、十次独立的工具调用，这件事就被打散了，没有一个东西能完整地代表&quot;这次改动&quot;。</p>
+<p>Codex 的选择是把整组改动<strong>装进一封信</strong>：信封里逐条写&quot;给这个文件加这些行&quot;&quot;把那个文件的这一段换成那样&quot;&quot;删掉这个文件&quot;。一次调用，一封信，就是一个<strong>完整、自描述的改动集</strong>。这封信本身长得就像一份 <code>git diff</code>——于是好处自动涌出来：它能整封拿给用户看&quot;你要批准的就是这些&quot;（审批，见 <a href="../s04_approval/index.html">s04</a>）、能整封存档备查（rollout，见 <a href="../s08_rollout/index.html">s08</a>）、出问题能整封回滚。<strong>把&quot;一次改动&quot;做成一个可以整体传递的东西，远比散落的十次调用值钱。</strong></p>
+<p><strong>道理三（最妙）：信封里靠&quot;内容&quot;而不是&quot;行号&quot;定位，是为了迁就一个会数错数的模型。</strong> 信封里要说清&quot;改的是文件的哪一段&quot;。最容易想到的是报行号——&quot;把第 42 行换掉&quot;。但这对 LLM 是个陷阱：<strong>模型其实不会可靠地数行</strong>。它能读懂代码、能想出怎么改，可你让它精确数到&quot;这是第几行&quot;，它经常差一两行；文件前面但凡有人加删过几行，行号还会整体漂移。把定位押在行号上，等于把成败押在模型最不擅长的能力上。</p>
+<p>Codex 反其道而行：定位不靠行号，而靠<strong>贴出那段代码周围几行原文</strong>当&quot;路标&quot;——&quot;在<code>长这样</code><code>长那样</code>这几行之间，把中间这行改掉&quot;。为什么这聪明？因为<strong>照抄一小段原文，恰恰是模型最擅长的事</strong>（它刚刚才读过这个文件）。于是即便它从头到尾一个行号都没数对，应用补丁的程序仍能拿着这几行路标，在文件里<strong>按内容找到</strong>那个位置，精准下刀。</p>
+<p>一个比方：让一个粗心的朋友帮你在书里夹书签。你说&quot;夹在第 213 页&quot;——他多半翻错。但你说&quot;夹在那句『从前有座山』和『山里有座庙』中间&quot;——他一找一个准。<strong>行号是会骗人的页码，上下文是认得出的句子。</strong> apply_patch 赌的就是：模型抄句子比数页码靠谱得多。这一章，我们就把这封信封的&quot;解析&quot;和&quot;按句子定位地应用&quot;亲手实现一遍。</p>
+<h2 id="问题">问题</h2>
+<p>模型要修改代码。怎么把&quot;改动&quot;这件事表达出来？</p>
+<ul><li>用 <code>bash</code> + <code>sed</code>/<code>cat &gt; file</code>？脆弱、易错、难审查。</li><li>像 Claude Code 那样逐次 <code>edit(old_string → new_string)</code>？精确，但要改 5 个文件、每个文件 3 处时，就是 15 次工具调用。</li></ul>
+<p>Codex 选了第三条路：<strong>一个补丁信封</strong>。</p>
+<h2 id="解决方案">解决方案</h2>
+<p><code>apply_patch</code> 工具吃一段带标记的补丁文本，一次调用就能对多个文件做新增 / 更新 / 删除 / 重命名：</p>
+<pre><code>*** Begin Patch
+*** Add File: src/hello.py
++print(&quot;hi&quot;)
+*** Update File: README.md
+*** Move to: docs/README.md
+@@
+ # 项目
+-旧的一行
++新的一行
+*** Delete File: legacy.txt
+*** End Patch</code></pre>
+<p>这个格式有正式的 Lark 文法，定义在真源码 <code>codex-rs/apply-patch/src/parser.rs:7-22</code>。标记一览：</p>
+<table><thead><tr><th>标记</th><th>含义</th></tr></thead><tbody><tr><td><code>*** Add File: &lt;path&gt;</code></td><td>新建文件，后续每行以 <code>+</code> 开头</td></tr><tr><td><code>*** Update File: &lt;path&gt;</code></td><td>修改文件，后接可选 <code>*** Move to:</code> 和若干 <code>@@</code> 块</td></tr><tr><td><code>*** Delete File: &lt;path&gt;</code></td><td>删除文件</td></tr><tr><td><code>*** Move to: &lt;path&gt;</code></td><td>（在 Update 内）重命名</td></tr><tr><td><code>@@ [上下文]</code></td><td>定位锚点；其后 <code> </code>=上下文、<code>-</code>=删除、<code>+</code>=新增</td></tr></tbody></table>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>，分两段：<strong>解析</strong> → <strong>应用</strong>。</p>
+<p><strong>解析</strong> <code>parse_patch(text)</code>：逐行扫描，遇到 <code>*** Add/Update/Delete File:</code> 就开一个 hunk。Update 的正文按 <code>@@</code> 切成若干 chunk，每行第一个字符是 tag（<code> </code>/<code>+</code>/<code>-</code>），其余是内容。</p>
+<p><strong>应用</strong> <code>apply_hunk(h)</code> 的关键是 Update 的「上下文锚定」——它不靠行号，而是靠内容定位：</p>
+<pre><code class="language-python">old = [ln for tag, ln in chunk if tag in (&quot; &quot;, &quot;-&quot;)]   # 文件里现有的样子（上下文+被删）
+new = [ln for tag, ln in chunk if tag in (&quot; &quot;, &quot;+&quot;)]   # 替换后的样子（上下文+新增）
+idx = _find_block(file_lines, old)                     # 按内容找到这一段
+file_lines[idx:idx + len(old)] = new                   # 整段替换</code></pre>
+<p>因为靠上下文而非行号定位，模型即使数错行号，补丁照样能贴上去——这对 LLM 很关键。（教学版 <code>_find_block</code> 现在也做 <code>seek_sequence</code> 式的<strong>三级降级匹配</strong>：精确 → 忽略行尾空白 → 忽略首尾空白，所以行号漂移、缩进/行尾的小出入都能容忍；详见下方「生产级」一节。真 Codex 在此之上还有 <code>eof</code> 锚定与 git-apply 式的字节级宽松。）</p>
+<p><strong>走一遍</strong> — 用 <code>python s03_apply_patch/code.py --demo</code> 真正跑的那个例子，看&quot;按内容定位&quot;是怎么发生的。先有一个文件 <code>poem.txt</code>（第一步 Add 出来的）：</p>
+<pre><code>roses are red
+violets are blue
+codex writes patches
+and so can you</code></pre>
+<p>现在模型想把第 2 行 <code>violets are blue</code> 改成 <code>violets are violet</code>。注意它<strong>没报任何行号</strong>——它发来的补丁信封是这样（这正是 demo 里那段 Update 补丁）：</p>
+<pre><code>*** Begin Patch
+*** Update File: _demo_workspace/poem.txt
+@@
+ roses are red
+-violets are blue
++violets are violet
+ codex writes patches
+*** End Patch</code></pre>
+<p>读这段的窍门全在<strong>每行的第一个字符</strong>：开头一个<strong>空格</strong>表示&quot;这行是路标，原样保留&quot;；<code>-</code> 表示&quot;删掉这行&quot;；<code>+</code> 表示&quot;加上这行&quot;。于是程序把它拆成两份名单——</p>
+<ol><li><strong>&quot;文件现在应该长这样&quot;</strong>（路标 + 被删的行，即空格行和 <code>-</code> 行，去掉首字符）：</li></ol>
+<pre><code class="language-python">   old = [&quot;roses are red&quot;, &quot;violets are blue&quot;, &quot;codex writes patches&quot;]</code></pre>
+<ol><li><strong>&quot;替换后应该长这样&quot;</strong>（路标 + 新增的行，即空格行和 <code>+</code> 行）：</li></ol>
+<pre><code class="language-python">   new = [&quot;roses are red&quot;, &quot;violets are violet&quot;, &quot;codex writes patches&quot;]</code></pre>
+<p>接着是最关键的一步：<code>_find_block(file_lines, old)</code> 拿着 <code>old</code> 这串&quot;路标 + 旧行&quot;，<strong>在文件里逐位置比对、找出它出现在哪</strong>——这里匹配到第 0 行起的那三行。找到了，就把文件里那一段<strong>整段换成 <code>new</code></strong>：</p>
+<pre><code class="language-python">idx = _find_block(file_lines, old)        # → 0（按内容找到，全程没用行号）
+file_lines[idx:idx + len(old)] = new      # 第 0~2 行整段替换为 new</code></pre>
+<p>看出妙处了吗？模型只是<strong>照抄了 <code>roses are red</code> 和 <code>codex writes patches</code> 这两句它刚读过的原文</strong>当路标，夹着要改的那行——它完全没去数&quot;这是第几行&quot;。哪怕这首诗前面被人加过 10 行、真实行号早就漂移，<code>_find_block</code> 照样能凭这两句路标找到位置。这就是上面&quot;道理三&quot;在代码里的样子：<strong>赌模型抄句子，而不赌它数页码。</strong> （demo 里还跟了第二个 chunk，在末尾那句 <code>and so can you</code> 后面加一行——同理，靠 <code>and so can you</code> 这句路标定位。跑一下 <code>--demo</code>，前后文件内容都会打印出来。）</p>
+<h2 id="生产级补丁贴不上抄歪了半途失败怎么不崩不留半成品">生产级：补丁贴不上、抄歪了、半途失败——怎么不崩、不留半成品</h2>
+<p>apply_patch 的真正难处不在&quot;格式对了怎么应用&quot;，而在&quot;<strong>模型把补丁写歪了怎么办</strong>&quot;——它会把上下文缩进抄错、会贴一段文件里根本没有的上下文、一封补丁里某个 hunk 失败而前面的已经写盘了。三件事，生产级各有答案（<a href="code.py">code.py</a> 都实现了）。</p>
+<h3 id="一模糊匹配容忍模型抄歪空白seek_sequence-三级降级">一、模糊匹配：容忍模型抄歪空白（seek_sequence 三级降级）</h3>
+<p>模型照抄上下文当路标，却常把行尾空格、缩进抄得不完全一致。若要求<strong>逐字精确</strong>，补丁就白白贴不上。真 Codex 的 <a href="../../codex/codex-rs/apply-patch/src/seek_sequence.rs"><code>seek_sequence.rs</code></a> 用<strong>三级降级匹配</strong>（strictness 递减）：① 精确相等 → 找不到再 ② 忽略<strong>行尾</strong>空白（<code>rstrip</code>）→ 再找不到 ③ 忽略<strong>首尾</strong>空白（<code>strip</code>）；命中越靠前越严。本章已把 <code>_find_block</code> 升级成同样的三级。<code>--demo</code> 段 ③ 故意把上下文行尾抄出多余空格——照样贴上：</p>
+<pre><code>③ 生产级·模糊匹配：故意把上下文行尾抄出多余空格，照样贴上：
+应用成功:
+M _demo_workspace/poem.txt
+   第 2 行 → violets are PURPLE</code></pre>
+<p>（真 Codex 还更进一步：<code>eof</code> 锚定、git-apply 式的字节级宽松——但&quot;逐级放宽&quot;是同一个思想。）</p>
+<h3 id="二原子性要么全贴上要么一个字节都不写">二、原子性：要么全贴上，要么一个字节都不写</h3>
+<p>一封补丁可能改五个文件。若第三个 hunk 上下文找不到、而前两个已写盘，你就得到一个<strong>半成品</strong>——比彻底失败更糟（呼应思考 2）。生产级做法是<strong>两阶段提交</strong>：先在内存副本上<strong>模拟</strong>所有改动（&quot;准备&quot;），全过了再<strong>落盘</strong>（&quot;提交&quot;）；任一步失败，磁盘原封不动。本章 <code>apply_patch_tool</code> 就先跑一遍 dry-run 预检再写。</p>
+<h3 id="三出错回灌把失败还给模型让它自己改">三、出错回灌：把失败还给模型，让它自己改</h3>
+<p>定位失败不该让进程崩溃——而该把一句<strong>人话错误</strong>作为工具结果回灌给模型（正是 <a href="../s02_tool_use/index.html">s02 生产级</a> 那条 <code>RespondToModel</code> 原则；真 Codex 的 <code>ApplyPatchError</code> 也走这条路）。<code>--demo</code> 段 ④ 喂一个贴不上的补丁：</p>
+<pre><code>④ 生产级·原子性 + 错误回灌：补丁含一个根本不存在的上下文：
+   apply_patch 失败（整封未应用，磁盘未改动）：在 .../poem.txt 找不到上下文 [&#x27;THIS LINE DOES NOT EXIST&#x27;, &#x27;x&#x27;]…；请照抄文件里那几行原文当路标再试。
+   文件未被破坏，第 2 行仍是： violets are PURPLE</code></pre>
+<p>错误串特意点明&quot;整封未应用、磁盘未改动&quot;并给出<strong>下一步怎么做</strong>——模型读到就能重抄路标再试，而不是对着 traceback 干瞪眼。</p>
+<blockquote>一句话：补丁工具的生产级，是三件事——<strong>抄歪了能容忍（模糊匹配）、失败了不留半成品（原子）、错了能自我修正（回灌）</strong>。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>编辑原语</td><td><code>Edit</code>(精确 old→new 串替换)、<code>Write</code>、<code>MultiEdit</code></td><td>单一 <code>apply_patch</code> 补丁信封</td></tr><tr><td>一次调用范围</td><td>一处（MultiEdit 一个文件多处）</td><td>跨多文件 增/改/删/移 一次搞定</td></tr><tr><td>形态</td><td>字符串替换</td><td>类 unified-diff，天生可审查/可回滚</td></tr><tr><td>定位</td><td>要求 old_string 全局唯一</td><td><code>@@</code> 上下文锚定，容忍行号漂移</td></tr></tbody></table>
+<p><strong>为什么不同？三个原因：</strong></p>
+<ol><li><strong>工具要贴合模型被训练出来的输出习惯。</strong> OpenAI 把 <code>apply_patch</code> 这个格式直接训进了 Codex 模型；Anthropic 把精确串替换训进了 Claude。工具设计跟着&quot;模型最擅长吐什么&quot;走，而不是反过来。</li><li><strong>批量 + 原子 + 可审查。</strong> 一个补丁就是一次完整的、跨文件的改动集，本身就是一份 diff——天然适合展示给用户审批（<a href="../s04_approval/index.html">s04</a>）、记录进 rollout（<a href="../s08_rollout/index.html">s08</a>）、整体回滚。</li><li><strong>对 LLM 鲁棒。</strong> 上下文锚定比&quot;行号&quot;或&quot;要求字符串全局唯一&quot;更能容忍模型的小误差。</li></ol>
+<p><strong>代价</strong>：解析器更复杂（<a href="../../codex/codex-rs/apply-patch/src/parser.rs">parser.rs</a> 有 954 行），且对上下文是否匹配敏感。Claude 的串替换则更简单直接。没有银弹，只有取舍。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<p>真 Codex 的 apply_patch 是独立 crate <a href="../../codex/codex-rs/apply-patch/index.html"><code>apply-patch/</code></a>：<code>parser.rs</code>(954 行) + <code>lib.rs</code>(1689 行) + <code>streaming_parser.rs</code> + <code>seek_sequence.rs</code>。教学版只取了它的骨架。</p>
+<details>
+<summary>一、严格解析 vs 宽松解析</summary>
+<p><code>parser.rs</code> 有 <code>ParseMode::Strict</code> 和 <code>ParseMode::Lenient</code>。因为某些模型（如 gpt-4.1）吐出的补丁格式不总是严丝合缝，Codex 默认走<strong>宽松</strong>模式（<code>PARSE_IN_STRICT_MODE = false</code>），容忍标记前后的空白等。教学版只实现了&quot;宽松&quot;的一种近似。</p>
+</details>
+<details>
+<summary>二、流式解析（边生成边解析）</summary>
+<p><code>streaming_parser.rs</code> 能在补丁还在被模型生成时就<strong>增量解析</strong>，配合流式 UI 实时显示 diff。教学版则等整段补丁到齐才一次性解析。</p>
+</details>
+<details>
+<summary>三、模糊上下文匹配 seek_sequence.rs</summary>
+<p>本章已把 <code>_find_block</code> 升级成 <code>seek_sequence.rs</code> 同款的<strong>三级降级匹配</strong>（精确 → 忽略行尾 → 忽略首尾空白，见「生产级」一节）。真 Codex 在此之上还做 <code>eof</code> 锚定（优先从文件尾匹配）和更接近 <code>git apply</code> 的字节级宽松规整。核心思想一致：<strong>逐级放宽，迁就会犯小错的 LLM</strong>。</p>
+</details>
+<details>
+<summary>四、沙箱感知的文件写入 + 边界情况</summary>
+<p><code>lib.rs</code> 通过 <code>ExecutorFileSystem</code> 写文件，受沙箱（s05）与审批（s04）约束；还处理 <code>*** Move to:</code> 重命名、二进制文件保护、符号链接、<code>*** End of File</code> 等教学版略过的边界。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s03_apply_patch/code.py --demo   # 不需要模型：演示 Add + Update
+python s03_apply_patch/code.py          # 交互模式（mock 会发一个 apply_patch 调用）</code></pre>
+<p><code>--demo</code> 会在 <code>_demo_workspace/</code> 里建一个文件再改它，打印前后内容；跑完会<strong>自动清理</strong>该目录（和其余各章一致）。</p>
+<h2 id="小结">小结</h2>
+<ul><li>Codex 用一个结构化补丁信封表达所有文件改动，而非逐次串替换。</li><li>上下文锚定让补丁对模型误差鲁棒。</li><li>这是「工具设计跟随模型训练」的典型例子。</li><li><strong>生产级</strong>：模糊匹配（seek_sequence 三级降级）容忍抄歪的空白、两阶段提交保证原子性（失败不留半成品）、定位失败把错误回灌给模型自我修正（见「生产级」一节）。</li><li>下一站 <a href="../s04_approval/index.html">s04</a>：补丁也好、命令也罢，落盘之前要不要先问用户一句&quot;批准吗？&quot;——这就是审批策略。</li></ul>
+<h2 id="思考">思考</h2>
+<div class="think">
+<ol><li>模型把 <code>@@</code> 上下文行的缩进数错了一个空格，精确匹配就会失败——真 Codex 用模糊匹配兜底。你觉得&quot;模糊&quot;到什么程度算安全？过度模糊会带来什么风险？</li><li>apply_patch 把多文件改动打包成一次调用。可如果补丁的第三个 hunk 应用失败，前两个已经写盘了——该回滚吗？要做到原子性，你会怎么设计？</li><li>为什么 OpenAI 宁可训练模型输出这种<strong>自定义</strong>补丁格式，也不直接用标准 unified diff（<code>git diff</code>）？标准格式差在哪？</li><li>如果让 Claude（被训练成擅长精确串替换）去用 apply_patch、或让 Codex 去用 <code>Edit(old→new)</code>，会发生什么？这说明工具和模型之间是什么关系？</li></ol>
+</div>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

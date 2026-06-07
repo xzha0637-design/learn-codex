@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s06: AGENTS.md — 从 cwd 一路向上，把项目规则分层注入</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s06-agentsmd-从-cwd-一路向上把项目规则分层注入">s06: AGENTS.md — 从 cwd 一路向上，把项目规则分层注入</h1>
+<blockquote><em>&quot;项目的规矩写在文件里，沿着目录树一层层叠加——根定基调，子包微调。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · 上一章：<a href="../s05_sandbox/index.html">s05 sandbox</a> → <strong>s06</strong> → 下一章：<a href="../s07_context_compaction/index.html">s07 context compaction</a></p>
+<hr>
+<h2 id="先把思想说透为什么要给模型喂项目记忆又为什么要顺着目录树往上找">先把思想说透：为什么要给模型&quot;喂项目记忆&quot;，又为什么要&quot;顺着目录树往上找&quot;</h2>
+<p>前几章的 agent 有手（能改文件）、有锁（沙箱）。但它还有个根本短板：<strong>它对你这个项目一无所知</strong>。这一章解决的就是&quot;让它入乡随俗&quot;。两个道理讲透，你就懂了 AGENTS.md 为什么长这样。</p>
+<p><strong>道理一：模型不是不守规矩，是它压根不知道你的规矩——所以得把规矩写下来递给它。</strong> 你新来一个能力很强的外包同事，第一天他不可能知道&quot;我们这缩进用 2 个空格&quot;&quot;提交信息写中文&quot;&quot;<code>legacy/</code> 那个目录谁都别碰&quot;。他不是故意捣乱，是<strong>没人告诉过他</strong>。模型也一样：它每开一个新对话都像&quot;失忆的第一天&quot;，于是缩进忽 2 忽 4、提交信息一会儿中文一会儿英文。 怎么办？最朴素也最有效的办法——<strong>把项目的规矩写成一张纸条，每次干活前先塞给它读一遍</strong>。这张纸条就是 <code>AGENTS.md</code>：一个放在项目里的纯文本文件，里面是给模型看的&quot;本项目须知&quot;。机制朴素到近乎平凡，但它把&quot;模型不懂规矩&quot;这个问题，变成了&quot;你有没有把规矩写下来&quot;这个<strong>你能掌控</strong>的问题。</p>
+<p><strong>道理二：一张纸条不够——大项目的规矩是分层的，所以发现规矩也得分层。</strong> 但很快你会撞见一个真实结构：大仓库（monorepo）里规矩<strong>不是一份</strong>。仓库根有一套全局基调，可 <code>packages/web</code> 偏要用 2 空格、<code>packages/api</code> 用 4 空格、<code>services/legacy</code> 还守着自己的祖传规矩。一份&quot;全局须知&quot;根本表达不了这种&quot;<strong>整体一致、局部例外</strong>&quot;。 那怎么让 agent 既知道全局基调、又尊重你当前所在角落的特殊规矩？答案藏在一个很自然的类比里——<strong>法律是分层的</strong>：国家有宪法，省有省的条例，市有市的细则；你站在某个市里办事，这三层<strong>同时</strong>对你生效，而越具体的那层，越能在细节上覆盖上层。项目规矩也该这样组织。 于是 Codex 的做法是：<strong>从你当前所在的目录（cwd）顺着目录树一路往上走</strong>，直到撞见&quot;项目根&quot;的标记（默认是 <code>.git</code> 目录，它天然标出&quot;仓库从这里开始&quot;），把沿途每一层的 <code>AGENTS.md</code> 都收集起来。&quot;往上走&quot;这个动作本身就在回答&quot;我属于哪些层&quot;——就像你报地址会说&quot;中国·浙江·杭州&quot;，从具体到笼统，正是你归属的那条链。</p>
+<p><strong>道理三：拼接时&quot;根在前、叶在后&quot;，是因为模型顺着读、后看到的能盖住先看到的。</strong> 收集到一摞规矩，按什么顺序拼给模型？Codex 选<strong>根在最前、你所在的目录在最后</strong>。这不是随意定的，而是利用了模型读文本的一个特性：它是<strong>顺序读</strong>的，<strong>后出现的指令能细化甚至推翻先出现的</strong>。于是&quot;仓库定基调（先读）、子包做例外（后读、能覆盖）&quot;就自然成立了——这正好把上面&quot;法律分层、下级覆盖上级&quot;的直觉，翻译成了模型能照做的形状。</p>
+<p>串起来：模型每次都&quot;失忆&quot;，所以把规矩写成文件喂给它（道理一）；大项目规矩分层，所以顺着目录树往上找、逐层收集（道理二）；按根→叶拼接，让具体的局部规矩能盖住笼统的全局规矩（道理三）。三步合起来，agent 就从&quot;不懂规矩的新人&quot;变成了&quot;读过本项目须知、还分得清全局与局部的老手&quot;。</p>
+<h2 id="问题">问题</h2>
+<p>你让 agent 在一个大仓库里干活。这个仓库有自己的规矩：缩进用几个空格、提交信息用什么语言、测试怎么跑、哪些目录碰不得。但模型一无所知——它每次都从零开始猜，于是缩进风格忽 2 忽 4，提交信息一会儿中文一会儿英文。</p>
+<p>更糟的是 <strong>monorepo</strong>：仓库根有一套全局约定，可 <code>packages/web</code> 用 2 空格、<code>packages/api</code> 用 4 空格，<code>services/legacy</code> 还有自己的祖传规矩。一份「全局指令」根本表达不了这种「整体一致、局部例外」的结构。</p>
+<p>你需要的是：<strong>让项目把规则写进文件，agent 自动发现并按层级叠加进上下文</strong>——而且越靠近你当前工作目录的规则，越能在局部覆盖上层的约定。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>Codex 的答案是 <code>AGENTS.md</code>：一种放在目录里的纯文本指令文件。发现规则是<strong>分层</strong>的——</p>
+<ol><li>从当前工作目录 <code>cwd</code> <strong>向上走</strong>，直到撞见「项目根标记」（默认是 <code>.git</code> 目录）；</li><li>从项目根 <strong>向下</strong> 回到 <code>cwd</code>（含两端），逐层收集每个目录里的 <code>AGENTS.md</code>；</li><li>按 <strong>根 → cwd</strong> 的顺序拼接（根在最前），中间用一个分隔符标出边界；</li><li>把结果包成一个 <code>&lt;user_instructions&gt;</code> 块，注入进这一回合的 <code>instructions</code>（system）。</li></ol>
+<pre><code>    /repo/.git              ← 项目根标记（停在这里，不再向上）
+    /repo/AGENTS.md         ──┐  根：仓库级约定（最前）
+    /repo/pkg/AGENTS.md     ──┤  中：包级约定
+    /repo/pkg/sub/AGENTS.md ──┘  叶：你所在目录的约定（最后 → 可局部覆盖）
+         ▲
+         │  cwd = /repo/pkg/sub
+         │
+    发现顺序：根 → cwd            拼接后注入：
+         │                       &lt;user_instructions&gt;
+         ▼                         [repo 的规则]
+    向上找根 → 向下收集            --- project-doc ---
+                                   [pkg 的规则]
+                                   --- project-doc ---
+                                   [sub 的规则]
+                                 &lt;/user_instructions&gt;</code></pre>
+<p>「根在前、叶在后」很关键：模型读指令是顺序读的，<strong>后出现的可以细化甚至推翻先出现的</strong>——这正好对应「仓库定基调、子包做例外」。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>，三个函数串起整条路径：</p>
+<p><strong>第 1 步</strong> — <code>find_project_root(start)</code>：从 <code>start</code> 向上遍历每个祖先目录，命中任一根标记（默认 <code>.git</code>）就返回；走到顶都没有就返回 <code>None</code>（此时只看 <code>cwd</code> 自己，不向上越界）。</p>
+<pre><code class="language-python">def find_project_root(start: Path) -&gt; Path | None:
+    for ancestor in [start, *start.parents]:
+        for marker in PROJECT_ROOT_MARKERS:   # 默认 [&quot;.git&quot;]
+            if (ancestor / marker).exists():
+                return ancestor
+    return None</code></pre>
+<p><strong>第 2 步</strong> — <code>discover_agents_md(cwd)</code>：先算出 <strong>根→cwd</strong> 的目录序列（<code>search_dirs</code> 从 cwd 向上收集到 root 再 <code>reverse()</code>），逐目录找第一个命中的候选文件名（<code>AGENTS.override.md</code> 优先于 <code>AGENTS.md</code>）：</p>
+<pre><code class="language-python">for d in search_dirs(cwd):            # 顺序：根 → cwd
+    for name in AGENTS_FILENAMES:     # [&quot;AGENTS.override.md&quot;, &quot;AGENTS.md&quot;]
+        if (d / name).is_file():
+            found.append(d / name)
+            break                     # 一个目录只取一个（override 优先）</code></pre>
+<p><strong>第 3 步</strong> — <code>read_agents_md</code> 按预算（<code>PROJECT_DOC_MAX_BYTES</code>，默认 32 KiB）读取并用分隔符拼接；<code>build_user_instructions_block</code> 再包成 <code>&lt;user_instructions&gt;</code> 块，由 <code>run_turn</code> 拼进本回合的 system。注意 <code>run_turn</code> <strong>每回合都用当前 cwd 重新发现</strong>——项目指令是随目录变化的。</p>
+<p>这忠实对应真源码 <a href="../../codex/codex-rs/core/src/agents_md.rs"><code>core/src/agents_md.rs</code></a>：<code>AgentsMdManager</code> 的 <code>agents_md_paths</code> 做「向上找根、向下收集」（<code>dir.ancestors()</code> + <code>dirs.reverse()</code>），<code>read_agents_md</code> 维护字节预算，分隔符常量是 <code>AGENTS_MD_SEPARATOR = &quot;\n\n--- project-doc ---\n\n&quot;</code>。最终它会变成一个 <code>&lt;user_instructions&gt;</code> 块（<a href="../../codex/codex-rs/protocol/src/protocol.rs"><code>protocol/src/protocol.rs</code></a> 的 <code>USER_INSTRUCTIONS_OPEN_TAG</code>）注入回合。</p>
+<p><strong>走一遍</strong> — 拿一棵真实的小目录树，看这三步把分散的规矩拼成一块注入文本。假设磁盘上长这样（仓库根有 <code>.git</code> 标记，根和子包各放了一个 <code>AGENTS.md</code>）：</p>
+<pre><code class="language-text">proj/.git/                ← 项目根标记
+proj/AGENTS.md            ← 仓库级：用 4 空格缩进 / 提交信息用英文
+proj/sub/AGENTS.md        ← 子包级：本目录改用 2 空格 / 跑 `pytest -q`</code></pre>
+<p>现在你站在最深的 <code>proj/sub</code> 里发起一个回合，cwd = <code>proj/sub</code>：</p>
+<p>第 1 步，<code>find_project_root(proj/sub)</code> 从 <code>sub</code> 往上一层层试：<code>sub</code> 里没有 <code>.git</code>？再上一层——<code>proj</code> 里有 <code>.git</code>，停。<strong>项目根 = <code>proj</code></strong>。</p>
+<p>第 2 步，<code>discover_agents_md</code> 先把&quot;从 cwd 向上到 root&quot;这条链收集出来再反转，得到<strong>根→cwd</strong>的发现顺序：</p>
+<pre><code class="language-text">1. proj/AGENTS.md        （根，最前）
+2. proj/sub/AGENTS.md    （叶，最后）</code></pre>
+<p>第 3 步，按这个顺序读取、用 <code>--- project-doc ---</code> 分隔符拼起来，再包进 <code>&lt;user_instructions&gt;</code> 标签——这就是真正塞进本回合 system 的那块文本：</p>
+<pre><code class="language-text">&lt;user_instructions&gt;
+# 仓库级规则（根）
+- 用 4 空格缩进
+- 提交信息用英文
+
+--- project-doc ---
+
+# 子包级规则（sub）
+- 本目录改用 2 空格缩进
+- 跑 `pytest -q`
+&lt;/user_instructions&gt;</code></pre>
+<p>看这块文本的顺序就懂了那条&quot;道理三&quot;：根的&quot;4 空格&quot;在前，子包的&quot;2 空格&quot;在后。模型顺着读下来，读到子包那句时就用它<strong>覆盖</strong>了根的缩进约定——于是在 <code>sub</code> 里它写 2 空格，但&quot;提交信息用英文&quot;这条根没被覆盖的规矩，依旧生效。一块拼接文本，同时表达了&quot;全局基调 + 局部例外&quot;。</p>
+<p><code>--demo</code> 直接演示：自建 <code>tmp/proj/.git</code> + <code>tmp/proj/AGENTS.md</code> + <code>tmp/proj/sub/AGENTS.md</code>，从最深的 <code>sub</code> 发起发现，打印「根在前」的拼接结果（就是上面这块），跑完删除整棵临时树。</p>
+<h2 id="生产级项目文档也会失控字节预算-截断">生产级：项目文档也会失控——字节预算 + 截断</h2>
+<p>AGENTS.md 是用户/项目能塞进每个回合 system 的文本。一个善意但失控的项目可能写出一个<strong>几万行</strong>的 AGENTS.md（或一串目录层层叠加），原样注入就会把上下文窗口吃光——还没开始干活，地方先没了。生产级做法是给注入设一个<strong>字节预算</strong>：真 Codex 用 <code>project_doc_max_bytes</code>（<a href="../../codex/codex-rs/core/src/agents_md.rs"><code>agents_md.rs:133</code></a>），沿目录树收集时累计字节，一旦超出剩余预算就把多出来的部分 <code>truncate</code> 掉（agents_md.rs:166-168）——宁可截断，也不让项目记忆挤掉真正的对话。</p>
+<p>合并也有<strong>明确的优先级</strong>：从 cwd 逐级向上收集，越靠近文件的越具体、越该赢（呼应 <a href="../s16_config/index.html">s16</a> 的分层 last-wins，真源码同样用 <code>merge_toml_values</code>）。&quot;逐级向上捡规矩&quot;不是随便拼接，而是一条有方向的合并链。</p>
+<blockquote>一句话：任何&quot;可由用户/项目注入进上下文&quot;的东西（AGENTS.md、skills、工具输出）都得有<strong>预算上限</strong>——否则它们就是绕过压缩（<a href="../s07_context_compaction/index.html">s07</a>）的后门。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>文件名</td><td><code>CLAUDE.md</code></td><td><code>AGENTS.md</code>（跨工具/跨厂商标准）</td></tr><tr><td>发现方式</td><td>也读项目级 memory，但更以单文件 + import 为中心</td><td><strong>分层</strong>：从 cwd 向上找根（<code>.git</code>），再根→cwd 逐层收集</td></tr><tr><td>叠加顺序</td><td>项目记忆 + 用户记忆合并</td><td><strong>根→叶 拼接</strong>，叶层可局部覆盖根层约定</td></tr><tr><td>注入形态</td><td>进系统提示/记忆</td><td>包成 <code>&lt;user_instructions&gt;</code> 块注入回合 <code>instructions</code></td></tr><tr><td>越界控制</td><td>—</td><td>不越过项目根；<code>project_doc_max_bytes</code>（默认 32 KiB）封顶</td></tr></tbody></table>
+<p><strong>为什么？</strong> 两点取舍：</p>
+<ul><li><strong>跨厂商标准</strong>。<code>AGENTS.md</code> 是 Codex 牵头推动的一个<strong>与具体工具无关</strong>的约定——同一个文件可被多家 agent 工具读取，而不是绑死在某个 CLI 的私有文件名上（<code>CLAUDE.md</code> 之于 Claude Code）。这与全课主线一致：Codex 押注的是 headless / CI / 云端等「无人值守、多工具协作」的场景，那里需要一个中立的、谁都认的指令载体。</li><li><strong>分层发现为 monorepo 而生</strong>。「向上找根、向下逐层收集、叶层可覆盖」精确地表达了「仓库定基调、子包做例外」的层级结构。Claude Code 更偏单一交互式工作区，单文件 + import 的模型已经够用；Codex 要在大型 monorepo 的任意子目录里被 <code>codex exec</code> 拉起来跑，就必须让指令「随你站的位置」自动分层组装。</li></ul>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<details>
+<summary>一、向上找根：ancestors + project_root_markers</summary>
+<p>教学版 <code>find_project_root</code> 用 <code>[start, *start.parents]</code> 遍历，命中 <code>.git</code> 即停。真源码 <code>agents_md.rs</code> 的 <code>agents_md_paths</code> 走 <code>dir.ancestors()</code>，逐个祖先 <code>ancestor.join(marker)</code> 调 <code>fs.get_metadata</code> 判断是否存在；标记列表来自配置：</p>
+<table><thead><tr><th>行为</th><th>真源码</th></tr></thead><tbody><tr><td>默认标记</td><td><code>default_project_root_markers()</code> → <code>DEFAULT_PROJECT_ROOT_MARKERS = &amp;[&quot;.git&quot;]</code>（<code>config/src/project_root_markers.rs</code>）</td></tr><tr><td>配置覆盖</td><td><code>project_root_markers_from_config</code> 读 <code>config.toml</code> 的 <code>project_root_markers</code> 数组</td></tr><tr><td><strong>空数组的语义</strong></td><td><code>Ok(Some(Vec::new()))</code> —— <strong>禁用向上遍历</strong>，只看 cwd 自己</td></tr><tr><td>找不到根</td><td><code>search_dirs</code> 退化为 <code>vec![dir]</code>，绝不越界向上</td></tr></tbody></table>
+<p>注意真源码还合并了 config layer stack（跳过 <code>Project</code> 层），教学版省掉了多层配置合并这一步——它对「发现路径」本身没有影响，只决定标记来自哪一层。</p>
+<pre><code class="language-rust">// agents_md.rs：找到根后，从 cwd 向上收集到 root，再反转成 根→cwd
+let mut cursor = dir.clone();
+loop { dirs.push(cursor.clone()); if cursor == root { break; } cursor = parent; }
+dirs.reverse();   // 根在最前</code></pre>
+</details>
+<details>
+<summary>二、候选文件名与 AGENTS.override.md 兜底</summary>
+<p>教学版 <code>AGENTS_FILENAMES = [&quot;AGENTS.override.md&quot;, &quot;AGENTS.md&quot;]</code>，一个目录命中一个即停。真源码 <code>candidate_filenames()</code> 顺序完全一致，且额外支持用户配置的 <code>project_doc_fallback_filenames</code> 追加在后面：</p>
+<pre><code class="language-rust">names.push(LOCAL_AGENTS_MD_FILENAME);    // &quot;AGENTS.override.md&quot;  —— 优先
+names.push(DEFAULT_AGENTS_MD_FILENAME);  // &quot;AGENTS.md&quot;
+for candidate in &amp;self.config.project_doc_fallback_filenames { ... }  // 再追加自定义兜底</code></pre>
+<p><code>AGENTS.override.md</code> 的用途：让你在<strong>不改动</strong>团队共享的 <code>AGENTS.md</code>（通常已提交进 git）的前提下，放一个<strong>本地、通常 .gitignore 掉</strong>的覆盖文件。真源码还有一条独立路径 <code>load_global_instructions</code>，从 <code>~/.codex/</code>（CODEX_HOME）读全局 <code>AGENTS.override.md</code> / <code>AGENTS.md</code>，作为 <code>User</code> 级指令——它和项目级是两个 provenance，拼接时只在 user/internal → project 的过渡处插 <code>--- project-doc ---</code> 分隔符。教学版把这套 provenance 体系简化成了「统一用分隔符分隔每个 project 文档」。</p>
+</details>
+<details>
+<summary>三、字节预算 project_doc_max_bytes 与截断</summary>
+<p>教学版 <code>read_agents_md</code> 维护 <code>remaining</code> 字节预算，超出就 <code>data[:remaining]</code> 截断并停止。真源码逻辑一致，默认值 <code>DEFAULT_PROJECT_DOC_MAX_BYTES = 32 * 1024</code>（<code>config/src/config_toml.rs</code>）：</p>
+<table><thead><tr><th>细节</th><th>真源码</th></tr></thead><tbody><tr><td>预算为 0</td><td><code>read_agents_md</code> 直接 <code>Ok(None)</code>——彻底关闭 AGENTS.md</td></tr><tr><td>逐文件扣减</td><td><code>remaining = remaining.saturating_sub(data.len())</code></td></tr><tr><td>超额截断</td><td><code>data.truncate(remaining)</code> 并 <code>tracing::warn!</code> 一条「truncating」日志</td></tr><tr><td>非法 UTF-8</td><td><code>warn_invalid_utf8</code> 推一条 startup warning，再 <code>from_utf8_lossy</code> 替换坏字节</td></tr><tr><td>非文件项</td><td><code>get_metadata</code> 判 <code>is_file</code>，目录/符号链接异常会被跳过</td></tr></tbody></table>
+<p>因为是<strong>根→cwd 顺序</strong>消费预算，越靠近 cwd（越深、越具体）的文件越可能在预算用尽时被裁——这是一个有意的取舍：宁可保住上层的全局约定。</p>
+</details>
+<details>
+<summary>四、它如何变成 user_instructions 块注入回合</summary>
+<p>教学版用一层 <code>&lt;user_instructions&gt; ... &lt;/user_instructions&gt;</code> 表达「这是注入的指令块」。真源码的包裹分两层：</p>
+<ul><li>内层：<code>core/src/context/user_instructions.rs</code> 的 <code>UserInstructions</code> fragment，<code>body()</code> 产出 <code>&quot;{directory}\n\n&lt;INSTRUCTIONS&gt;\n{text}\n&quot;</code>，<code>type_markers()</code> 是 <code>(&quot;# AGENTS.md instructions for &quot;, &quot;&lt;/INSTRUCTIONS&gt;&quot;)</code>——也就是说真实注入里<strong>带上了 cwd 路径</strong>，告诉模型「这些规则对应哪个目录」。</li><li>外层：<code>protocol/src/protocol.rs</code> 的 <code>USER_INSTRUCTIONS_OPEN_TAG</code> / <code>USER_INSTRUCTIONS_CLOSE_TAG</code>（<code>&lt;user_instructions&gt;</code> / <code>&lt;/user_instructions&gt;</code>）。</li></ul>
+<p>注入时机在回合构建里（<code>session/turn.rs</code> 一带），与 <code>&lt;environment_context&gt;</code> 等其它上下文片段一起，作为一条 <code>user</code> 角色的消息排进 prompt。还有一个 <code>Feature::ChildAgentsMd</code> 开关，开启时会额外追加一段 <code>HIERARCHICAL_AGENTS_MESSAGE</code> 的内部指引，告诉模型「你会看到分层的 AGENTS.md」。</p>
+<p>一句话：教学版 ~80 行的「向上找根 + 向下收集 + 拼接 + 包标签」，就是 <code>agents_md.rs</code>（433 行）+ provenance 体系 + 配置层合并 + 全局/项目双来源的核心；其余都是预算、UTF-8、多来源 provenance 这些生产级护栏。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s06_agents_md/code.py --demo   # 自建临时目录树演示分层发现，跑完自动清理（mock，无需 key）
+python s06_agents_md/code.py          # 交互模式：输入一个目录看从那里发现的 AGENTS.md</code></pre>
+<p><code>--demo</code> 全程离线、不调用模型，结束时会删除它创建的临时目录树。</p>
+<h2 id="小结">小结</h2>
+<ul><li><code>AGENTS.md</code> = 写进目录里的项目规则，<strong>分层发现</strong>：从 cwd 向上找根（默认 <code>.git</code>），再根→cwd 逐层收集。</li><li>拼接顺序「根在前、叶在后」，让子包能在局部覆盖仓库级约定——天然契合 monorepo。</li><li>用 <code>project_doc_max_bytes</code>（默认 32 KiB）封顶，<code>AGENTS.override.md</code> 提供不动共享文件的本地覆盖。</li><li>最终包成 <code>&lt;user_instructions&gt;</code> 块注入回合 <code>instructions</code>，与 Claude Code 的 <code>CLAUDE.md</code> 同类但走的是跨厂商标准 + 分层发现。</li><li><strong>生产级</strong>：AGENTS.md 注入有<strong>字节预算</strong>（<code>project_doc_max_bytes</code>），超了就截断——别让失控的项目文档挤掉真正的对话；合并按目录层级有明确优先级（见「生产级」一节）。</li><li>下一站 <a href="../s07_context_compaction/index.html">s07</a>：对话变长后，怎么把旧回合压成摘要、腾出上下文。</li></ul>
+<h2 id="思考">思考</h2>
+<ul><li>「根在前、叶在后、后者可覆盖前者」依赖模型<strong>忠实地按顺序读、并让后文压过前文</strong>。如果模型并不总是这么做（比如它更信任最先看到的全局规则），分层覆盖还成立吗？你会怎么在 <code>AGENTS.md</code> 的措辞上下功夫，让「覆盖」更稳？</li><li>项目根标记默认是 <code>.git</code>。在一个没有 <code>.git</code> 的目录（比如解压出来的 tarball、临时沙箱）里跑 <code>codex exec</code>，发现会退化成「只看 cwd」。这对「无人值守自动化」是好事还是隐患？你会把标记设成什么？</li><li>把 <code>AGENTS.md</code> 注入进<strong>每一回合</strong>意味着它持续占用上下文预算；而 s07 又要为腾地方压缩历史。当 32 KiB 的项目指令和被压缩的对话历史抢同一个窗口时，谁更该被保住？Codex 选择保住上层全局规则，你会怎么权衡？</li><li><code>AGENTS.md</code> 是给「模型」读的、放在仓库里、还可能被多家工具消费。它和给「人」读的 <code>README.md</code>、<code>CONTRIBUTING.md</code> 会不会逐渐重合甚至冲突？如果同一条规矩要同时讲给人和模型听，你愿意维护一份还是两份？</li></ul>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

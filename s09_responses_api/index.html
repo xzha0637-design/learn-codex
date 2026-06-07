@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s09: Responses API — Codex 的线协议</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s09-responses-api-codex-的线协议">s09: Responses API — Codex 的线协议</h1>
+<blockquote><em>&quot;不是 Chat Completions，也不是 Anthropic Messages。&quot;</em></blockquote>
+<p><a href="../index.html">learn-codex 总览</a> · <a href="../s08_rollout/index.html">s08 Rollout 续接</a> → <strong>s09</strong> → <a href="../s10_sq_eq_protocol/index.html">s10 SQ/EQ 协议</a></p>
+<hr>
+<h2 id="先把思想说透模型动不了它只会按格式吐条目看懂那张单子一切就不神秘了">先把思想说透：模型动不了，它只会「按格式吐条目」——看懂那张单子，一切就不神秘了</h2>
+<p><a href="../s01_agent_loop/index.html">s01</a> 讲过一句话：模型很聪明，但它<strong>动不了</strong>，它只会输出文字。这一章把那句话往下钻一层——既然模型只会「输出」，那它到底<strong>输出成什么样子</strong>？我们又是<strong>怎么把话递给它</strong>的？把这条「电话线」看明白，前面几章里那些「为什么 <code>messages</code> 长这样、为什么工具调用是独立一项」的疑惑会瞬间全部消散。三层道理。</p>
+<p><strong>道理一：你和模型之间隔着一根网线，两头必须先约好「话要怎么填进单子」。</strong> 模型不在你的程序里，它跑在 OpenAI 的服务器上，你俩靠网络喊话。可网络只会传字节，不认识「系统提示」「对话」「工具」这些概念——所以两头必须<strong>事先约定一张单子</strong>：哪个字段放身份设定、哪个字段放对话、哪个字段放工具清单、谁先谁后。这套约定就叫<strong>线协议</strong>。打个比方：同样是「点一杯咖啡」，麦当劳的点单格式和星巴克的不一样，你走进哪家，就得按哪家的单子填。市面上常见三张单子——Anthropic 的 Messages（Claude 用）、OpenAI 老的 Chat Completions、OpenAI 新的 Responses；它们表达的东西大同小异，但<strong>字段名和摆法各不相同</strong>。Codex 选的是 Responses。看懂一章，无非就是把「发出去的单子」和「收回来的单子」摊开，逐格念明白。</p>
+<p><strong>道理二：模型的「行动」全是假象——它从头到尾只是在单子上多填了一种条目而已。</strong> 这是最容易被神话、也最该被戳破的一点。当你看到 agent「跑了个命令」，仿佛模型真伸手干了活——其实模型<strong>什么都没干</strong>。它做的，只是在回话的单子里多填了一项，类型写着 <code>function_call</code>、名字写着 <code>shell</code>、参数写着 <code>{&quot;command&quot;:&quot;ls&quot;}</code>。这一项和「它说的一句人话」是<strong>并排的两个条目</strong>，没有高下之分，都只是「填在单子上的字」。真正去执行命令、把结果再填回单子的，是你那段 harness 代码（正是 <a href="../s01_agent_loop/index.html">s01</a> 的循环）。所以 Responses 把整段对话拆成一串<strong>扁平的条目</strong>：一句用户消息是一项、一次工具调用是一项、一条工具结果又是一项，平铺并排——这恰恰就是前几章 <code>messages</code> 列表的形状。一旦你接受「模型只会吐条目、动手的另有其人」，「为什么工具调用要单列成一项」就不再是疑问，而是顺理成章。</p>
+<p><strong>道理三（最关键）：协议是跟着模型长出来的，不是先有协议再塞模型——所以连「想了什么」都被请进了单子。</strong> 为什么 Codex 偏偏挑 Responses，而不是更老牌的 Chat Completions？因为它家的模型工作方式是「<strong>先想一段、再决定动手</strong>」，而协议得能<strong>装下这种工作方式</strong>。于是 Responses 干了件 Chat Completions 没做的事：把模型的<strong>推理</strong>也当成单子上一等的内容——请求里能用一个旋钮调「想多深」（轻一点/中等/深一点），回话里那段思考会作为<strong>单独一项</strong>回来，和「人话」「工具调用」并列。换句话说，「模型想了什么」不再是日志里的旁注，而是协议里<strong>要被传输、被存档、下次还能原样带回去</strong>的正经数据。这就是「<strong>协议跟随模型</strong>」：模型怎么思考、怎么行动，单子就长成什么样——而不是反过来拿一张老单子去削足适履。（这和 <a href="../s03_apply_patch/index.html">s03</a> 里「工具形状跟随模型」是同一个道理的两次现身。）</p>
+<p>把三点连起来：隔着网线要约定单子 → 模型的「行动」只是单子上多填一种条目 → 而单子的样子是被模型的思考-行动方式塑造出来的。看懂这张单子，这一章就通了；后面那些字段对比，不过是把这三点落到一个个具体格子里。</p>
+<h2 id="问题">问题</h2>
+<p>core 到底怎么和模型通信？三家 API 形状各不相同：Anthropic 的 Messages、OpenAI 的 Chat Completions、OpenAI 的 <strong>Responses</strong>。Codex 选了 Responses——为什么？因为它原生支持 <strong>reasoning（推理）</strong>、<strong>item 流式</strong>、以及服务端会话状态，正好贴合 Codex 模型「先推理、再行动」的工作方式。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>用 OpenAI <strong>Responses API</strong>。它和 Chat Completions 有几处关键不同：</p>
+<ul><li>系统提示叫 <code>instructions</code>（不叫 <code>system</code>）；</li><li>输入 <code>input</code> 是一串<strong>扁平的 item</strong>：<code>message</code> / <code>function_call</code> / <code>function_call_output</code> 混排（这正是前几章 <code>messages</code> 列表的形状）；</li><li>工具是<strong>扁平</strong>的 <code>{&quot;type&quot;:&quot;function&quot;,&quot;name&quot;,&quot;description&quot;,&quot;parameters&quot;}</code>；</li><li>多了 <code>reasoning: {effort}</code> 这一档——控制推理力度，Chat Completions 没有。</li></ul>
+<p>下面就用一个最小例子，把「请求怎么拼、响应怎么拆」一步步走一遍。</p>
+<h2 id="工作原理">工作原理</h2>
+<p>看 <a href="code.py">code.py</a>（本章纯讲解、离线），三个函数：</p>
+<ul><li><code>build_request(...)</code> 把对话 + 工具打包成一个 Responses 请求（一个 Python dict，序列化后就是发出去的 JSON）；</li><li><code>parse_response(resp)</code> 从响应的 <code>output</code> items 里分别抽出 <code>reasoning</code> / <code>message</code>(文本) / <code>function_call</code>(工具调用)；</li><li><code>protocol_comparison()</code> 把同一个 <code>shell</code> 工具在三家协议里的写法并排打印。</li></ul>
+<p>这正是 <a href="../codexlib.py">codexlib.py</a> 的 <code>openai</code> 后端真实在做的事；真源码见 <code>../../codex/codex-rs/core/src/client.rs</code>（<code>ModelClient::stream_responses</code>）与 <code>codex-api</code> crate。</p>
+<p><strong>走一遍</strong> —— 跟着 <code>--demo</code>，看一来一回的数据各长什么样、关键字段为什么是这个名字：</p>
+<ol><li><strong>构造请求。</strong> 给定一句用户消息「列出文件」和一个 <code>shell</code> 工具，<code>build_request</code> 打包出这样一坨 JSON（发给 OpenAI 的就是它）：</li></ol>
+<pre><code class="language-json">   {
+     &quot;model&quot;: &quot;gpt-5-codex&quot;,
+     &quot;instructions&quot;: &quot;You are Codex.&quot;,
+     &quot;input&quot;: [
+       {&quot;type&quot;: &quot;message&quot;, &quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;列出文件&quot;}
+     ],
+     &quot;tools&quot;: [
+       {&quot;type&quot;: &quot;function&quot;, &quot;name&quot;: &quot;shell&quot;, &quot;description&quot;: &quot;run a command&quot;,
+        &quot;parameters&quot;: {&quot;type&quot;: &quot;object&quot;,
+                       &quot;properties&quot;: {&quot;command&quot;: {&quot;type&quot;: &quot;string&quot;}}}}
+     ],
+     &quot;reasoning&quot;: {&quot;effort&quot;: &quot;medium&quot;},
+     &quot;stream&quot;: true
+   }</code></pre>
+<p>   逐字段看<strong>为什么是这样</strong>：系统提示放在 <code>instructions</code>（不是 <code>system</code>）；对话放在 <code>input</code>，是一串<strong>扁平 item</strong>（这里只有一条 user message，将来工具调用/结果也会平铺进同一个数组）；工具是<strong>扁平</strong>的 <code>{type:&quot;function&quot;, name, parameters}</code>；<code>reasoning.effort</code> 告诉模型「中等力度地想一想」——这一档 Chat Completions 根本没有。</p>
+<ol><li><strong>模型回来一份响应。</strong> demo 用一份写死的响应（含推理 + 一次工具调用）。响应的核心是 <code>output</code>——一串 item：</li></ol>
+<pre><code class="language-json">   {
+     &quot;output&quot;: [
+       {&quot;type&quot;: &quot;reasoning&quot;,
+        &quot;summary&quot;: [{&quot;type&quot;: &quot;summary_text&quot;,
+                     &quot;text&quot;: &quot;用户想看文件，应当调用 shell 跑 ls。&quot;}]},
+       {&quot;type&quot;: &quot;function_call&quot;, &quot;call_id&quot;: &quot;call_abc&quot;, &quot;name&quot;: &quot;shell&quot;,
+        &quot;arguments&quot;: &quot;{\&quot;command\&quot;: \&quot;ls -la\&quot;}&quot;}
+     ]
+   }</code></pre>
+<p>   <em>为什么</em>推理和工具调用是<strong>两个并排的 item</strong>：Responses 把「想了什么」和「决定干什么」拆成独立条目，于是流式时可以先把推理推给你看、再推工具调用——而不是塞在一条消息内部。注意 <code>arguments</code> 是一个 <strong>JSON 字符串</strong>（不是对象），需要再 <code>json.loads</code> 一次。</p>
+<ol><li><strong>解析响应。</strong> <code>parse_response</code> 按 <code>type</code> 分流，把上面的 <code>output</code> 抽成三样东西：</li></ol>
+<pre><code>   reasoning: [&#x27;用户想看文件，应当调用 shell 跑 ls。&#x27;]
+   text:      &#x27;&#x27;
+   tool_call: shell({&#x27;command&#x27;: &#x27;ls -la&#x27;})  call_id=call_abc</code></pre>
+<p>   这里 <code>text</code> 是空的——因为这一回合模型没有说人话，它<strong>直接决定调工具</strong>。<code>call_id</code> 很关键：等 <code>shell</code> 跑完，工具结果要带着<strong>同一个 <code>call_id</code></strong>作为 <code>function_call_output</code> 平铺回 <code>input</code>，模型才知道「这是刚才那次调用的结果」。这就把本章和前几章的回合循环接上了。</p>
+<ol><li><strong>三家协议并排。</strong> demo 最后把同一个 <code>shell</code> 工具定义在三家的写法打印出来，一眼看出差异：</li></ol>
+<pre><code>   Anthropic（Claude）:        {&quot;name&quot;:&quot;shell&quot;, …, &quot;input_schema&quot;:{…}}
+   OpenAI Responses（Codex）:  {&quot;type&quot;:&quot;function&quot;,&quot;name&quot;:&quot;shell&quot;, …, &quot;parameters&quot;:{…}}
+   OpenAI Chat Completions:    {&quot;type&quot;:&quot;function&quot;,&quot;function&quot;:{&quot;name&quot;:&quot;shell&quot;, …,&quot;parameters&quot;:{…}}}</code></pre>
+<p>   Anthropic 用 <code>input_schema</code> 且工具是顶层对象；Responses 用 <code>parameters</code> 且扁平；老的 Chat Completions 把工具又<strong>嵌</strong>进一层 <code>function</code>。同一件事，三张不同的单子——这就是「线协议」的全部含义。</p>
+<h2 id="生产级网络会抖模型会拒重试退避回退怎么做">生产级：网络会抖、模型会拒——重试、退避、回退怎么做</h2>
+<p>&quot;请求怎么拼、响应怎么拆&quot;通了。但真相是：<code>stream_responses</code> 不是一次干净的函数调用，而是一条<strong>会抖的网络长流</strong>——它会中途断线、会被限流（429）、会撞上服务端 5xx。玩具在这里抛异常崩掉；能上生产的 harness 把&quot;失败&quot;当成一条<strong>可恢复的常规路径</strong>。这一节把它讲到经得起检验，对应 <a href="../../codex/codex-rs/core/src/responses_retry.rs"><code>responses_retry.rs</code></a> + <a href="../../codex/codex-rs/core/src/util.rs"><code>util.rs:85</code></a>。</p>
+<h3 id="一先分类哪些错该重试哪些重试也白搭">一、先分类：哪些错该重试，哪些重试也白搭</h3>
+<p>重试的第一原则不是&quot;怎么退避&quot;，而是&quot;<strong>该不该重试</strong>&quot;——盲目重发一个 401 只是浪费时间。</p>
+<table><thead><tr><th>类别</th><th>例子</th><th>怎么办</th></tr></thead><tbody><tr><td><strong>可重试（瞬时）</strong></td><td>流断线、429 限流、5xx 服务端错</td><td>退避后重发——问题大概率自己会好</td></tr><tr><td><strong>致命（非瞬时）</strong></td><td>401 鉴权失败、400 请求非法</td><td>立刻失败——重试一万次还是错</td></tr></tbody></table>
+<p>真源码里这体现为 <code>CodexErr::Stream(_, requested_delay)</code>（可重试、还可能带服务端要求的延迟）与其它致命变体的区分。本章 <a href="code.py">code.py</a> 用 <code>TransientError</code> / <code>FatalError</code> 两个类把它教学化。</p>
+<h3 id="二指数退避-抖动为什么不能固定间隔重试">二、指数退避 + 抖动：为什么不能&quot;固定间隔重试&quot;</h3>
+<p>可重试的错误等多久再发？真 Codex 的 <code>backoff()</code>（<code>util.rs:85</code>）公式：</p>
+<pre><code>delay = INITIAL_DELAY × FACTOR^(attempt-1) × random(0.9, 1.1)</code></pre>
+<ul><li><strong>指数</strong>（200 → 400 → 800ms…）：服务端可能正过载，越重试越要给它喘息，而不是变本加厉猛敲。</li><li><strong>抖动（jitter）±10%</strong>：最容易漏、却最关键的一笔。若 1000 个客户端被同一次故障打断、又都用<strong>完全相同</strong>的间隔重试，它们会<strong>齐刷刷</strong>在同一毫秒再次涌上来，把刚缓过来的服务端二次打垮（thundering herd / 重试风暴）。一点随机抖动，就把这波重试<strong>摊开</strong>在时间轴上。</li></ul>
+<h3 id="三听服务端的honor-retry-after">三、听服务端的：honor Retry-After</h3>
+<p>服务端在 429 里明说了&quot;等 1500ms 再来&quot;，就<strong>别用退避公式瞎猜</strong>——听它的。真源码：<code>CodexErr::Stream(_, requested_delay)</code> 若带了 <code>requested_delay</code> 就 <code>unwrap_or_else(|| backoff(...))</code>——有就用服务端给的，没有才退避。</p>
+<h3 id="四封顶-传输回退重试不是无限的">四、封顶 + 传输回退：重试不是无限的</h3>
+<ul><li><strong>两个上限</strong>：<code>request_max_retries</code>（整个请求）与 <code>stream_max_retries</code>（流中途重连）分开配（<a href="../../codex/codex-rs/model-provider-info/src/lib.rs"><code>model-provider-info</code></a>），且都有硬上限，防止配出一个&quot;永远重试&quot;的死循环。</li><li><strong>传输回退</strong>：重试在 <strong>WebSocket</strong> 上耗尽后，真 Codex 不直接放弃，而是<strong>降级到 HTTPS+SSE、把重试计数清零再来一轮</strong>（<code>responses_retry.rs</code>）——一条路堵死，换条路再走。</li><li><strong>告诉用户</strong>：每次重连往前端发一句 <code>Reconnecting... {n}/{max}</code>，免得用户对着看似卡死的屏幕干瞪眼（还特意藏掉第一次 websocket 重连的噪声）。</li></ul>
+<h3 id="走一遍">走一遍</h3>
+<p><code>--demo</code> 段 ④ 把这套跑给你看（已固定随机种子，输出可复现）：</p>
+<pre><code> (a) 流断两次后自动重连：
+  ↻ Reconnecting... 1/5，193ms 后重试（指数退避+抖动）：stream disconnected
+  ↻ Reconnecting... 2/5，372ms 后重试（指数退避+抖动）：stream disconnected
+    → ok：第 3 次连上，拿到完整响应
+ (b) 429 限流、honor 服务端 Retry-After（不瞎猜延迟）：
+  ↻ Reconnecting... 1/5，1500ms 后重试（服务端 Retry-After）：429 too many requests
+    → ok：等满服务端要求的 1500ms 后通过
+ (c) 鉴权失败是致命错误，立刻放弃：
+  ✗ 致命错误，不重试：401 unauthorized（API key 无效）
+ (d) 一直失败，封顶 max_retries=2 后放弃（真身会先试 WebSocket→HTTPS 回退）：
+  ↻ Reconnecting... 1/2，206ms 后重试（指数退避+抖动）：stream keeps dropping
+  ↻ Reconnecting... 2/2，366ms 后重试（指数退避+抖动）：stream keeps dropping
+  ✗ 重试 2 次仍失败，放弃</code></pre>
+<p>看 (a) 的 193/372ms：就是 200×2⁰ 和 200×2¹ 各乘了点抖动；(b) 直接用服务端的 1500ms；(c) 一眼判死、零重试；(d) 撞到上限才放手。</p>
+<h3 id="还有一类特殊失败上下文撑爆-重试">还有一类特殊&quot;失败&quot;：上下文撑爆 ≠ 重试</h3>
+<p>不是所有失败都靠重试。撞上 <code>ContextWindowExceeded</code>（上下文超限），原样重发只会再超一次——正确反应是<strong>先压缩历史、再重试</strong>（reactive compaction，见 <a href="../s07_context_compaction/index.html">s07</a>）。这点出一条铁律：<strong>&quot;恢复&quot;不等于&quot;重试&quot;</strong>，得按错误性质选对策略。</p>
+<blockquote>一句话：生产级的模型调用，一半代码在&quot;怎么发请求、解析响应&quot;，另一半在&quot;<strong>它失败时怎么优雅地活下来</strong>&quot;。后者才是玩具与产品的分界线。</blockquote>
+<h2 id="-与-claude-code-的不同">🆚 与 Claude Code 的不同</h2>
+<table><thead><tr><th></th><th>Claude Code（Anthropic Messages）</th><th>Codex（OpenAI Responses）</th></tr></thead><tbody><tr><td>系统提示</td><td><code>system</code> 参数</td><td><code>instructions</code> 参数</td></tr><tr><td>工具定义</td><td><code>{name, description, input_schema}</code></td><td><code>{type:&quot;function&quot;, name, description, parameters}</code></td></tr><tr><td>工具调用/结果</td><td>内容块 <code>tool_use</code> / <code>tool_result</code>（嵌在 message 里）</td><td>独立 item <code>function_call</code> / <code>function_call_output</code></td></tr><tr><td>推理</td><td>extended thinking 块</td><td><code>reasoning.effort</code> 档位 + reasoning item</td></tr><tr><td>对话表示</td><td><code>messages[].content</code> 块数组</td><td>扁平的 input-item 列表</td></tr></tbody></table>
+<p><strong>为什么？</strong> 最直接的原因是<strong>各用自家模型与自家 API</strong>——工具/对话的形状必须贴合各自后端。更深一层：Responses 的「item 流 + reasoning 档位 + 服务端状态」让 Codex 能把模型的<strong>推理过程</strong>显式纳入协议、并支持流式地穿插工具调用与审批（<a href="../s10_sq_eq_protocol/index.html">s10 SQ/EQ 协议</a>）。这不是谁更好，而是「工具与协议跟随模型」的又一例证（呼应 <a href="../s03_apply_patch/index.html">s03</a> 里 apply_patch 的同款逻辑）。</p>
+<h2 id="深入教学版-vs-真-codex-源码">深入：教学版 vs 真 Codex 源码</h2>
+<p>真客户端在 <a href="../../codex/codex-rs/core/src/client.rs"><code>core/src/client.rs</code></a>（约 89K）+ <code>codex-api</code> crate。教学版只展示了&quot;构造请求 / 解析响应&quot;的形状。</p>
+<details>
+<summary>一、WebSocket 升级 + SSE 回退 + prewarm</summary>
+<p>教学版只画了「构造一个 dict → 解析一个 dict」，仿佛一来一回就完事。真 Codex 在<strong>连接</strong>这一层就讲究得多：</p>
+<ul><li><strong>优先 WebSocket</strong>：用 <code>ResponsesWebsocketClient</code> 在一条长连接上发多个回合，省掉每回合重新握手（TLS + HTTP）的开销。</li><li><strong>失败回退到 HTTP + SSE</strong>：环境不支持 WebSocket（某些代理/网关）时，自动退回「HTTP POST + SSE 流式响应」这条更通用的路。</li><li><strong>prewarm（预热）</strong>：在你真正发第一个请求之前，先偷偷发一个<strong>不生成内容</strong>的请求，把连接、路由、服务端会话状态都「热」起来——于是你按下回车后，<strong>首字延迟</strong>明显更短。</li></ul>
+<p><em>为什么教学版可以全省掉</em>：这些都不改变「请求/响应长什么样」，只影响<strong>快不快、稳不稳</strong>。教学目的是讲清协议形状，所以连接优化整层略去。</p>
+</details>
+<details>
+<summary>二、流式 SSE 增量解析</summary>
+<p>教学版的 demo 用一份<strong>写死的完整响应</strong>一次性解析。真 Codex 面对的是<strong>流</strong>：服务端通过 SSE（Server-Sent Events）把响应<strong>一块块</strong>推过来，每块是一个带 <code>type</code> 的事件，例如：</p>
+<pre><code>event: response.output_item.added        ← 新增了一个 item（如一个 function_call 的壳）
+event: response.reasoning_summary.delta  ← 推理摘要又来了一小段文字
+event: response.output_text.delta        ← 助手正文又来了一小段
+event: response.completed                ← 这一回合到此结束</code></pre>
+<p>真源码用 <code>eventsource_stream</code> 增量解析这些事件，边收边把 output items 拼起来。这正是命令输出 <code>OutputDelta</code>、流式 reasoning 的来源——它们汇成事件流，喂给 <a href="../s10_sq_eq_protocol/index.html">s10</a> 的 <strong>SQ/EQ</strong> 那一层。<em>为什么要流式</em>：用户不用干等模型憋完整段，能边想边看；工具调用也能在出现的瞬间就被前端捕获。</p>
+</details>
+<details>
+<summary>三、粘性路由：重试时怎么"接着上次那台继续"</summary>
+<p>重试本身见上面的「生产级」一节；这里补它的搭档——<strong>粘性路由（sticky routing）</strong>：请求携带一个 <code>x-codex-turn-state</code> 头，让<strong>同一回合</strong>的多次请求落到<strong>同一个后端实例</strong>。<em>为什么重要</em>：Responses 有<strong>服务端会话状态</strong>——前面那次推理/工具调用的上下文存在某台机器上，重试若被路由到别的实例，状态就对不上了。粘性路由保证「接着上次那台继续」——这正是重试能<strong>安全</strong>进行的前提（幂等性的一半）。</p>
+<p>教学版没有网络、没有服务端状态，这一整块自然不需要。</p>
+</details>
+<details>
+<summary>四、reasoning 是一等公民</summary>
+<p>教学版把 <code>reasoning</code> 当一个普通字段，<code>parse_response</code> 抽出文本就完事。真 Codex 把推理当<strong>可携带、可回放的状态</strong>来对待：</p>
+<ul><li><strong><code>effort</code> 档位</strong>：请求里 <code>reasoning: {effort: low|medium|high}</code> 控制模型「想多深」——想得越深越准、但越慢越贵。</li><li><strong>reasoning summary</strong>：响应回来的常是推理的<strong>摘要</strong>（给人看的版本），而非逐字的原始思维链。</li><li><strong>加密 reasoning 内容</strong>：有些推理内容是<strong>加密</strong>回传的——客户端原样存着、下回合再原样带回去，让模型「记得自己上次想到哪」，但客户端并不能明文读它。</li><li><strong>纳入持久化</strong>：推理会被写进 rollout（<a href="../s08_rollout/index.html">s08</a>），也会参与上下文压缩（<a href="../s07_context_compaction/index.html">s07</a>）的预算计算。</li></ul>
+<p>一句话：在 Responses 里，「模型想了什么」不是日志旁注，而是协议里<strong>一等的、要被存储和回放的</strong>数据。这正是 Codex 选 Responses 而非 Chat Completions 的核心理由之一。</p>
+</details>
+<h2 id="运行">运行</h2>
+<pre><code class="language-bash">python s09_responses_api/code.py --demo   # 构造请求 + 解析响应 + 三方对比 + 重试/退避/错误分类</code></pre>
+<h2 id="小结">小结</h2>
+<ul><li>Codex 走 OpenAI Responses API：系统提示叫 <code>instructions</code>，对话是<strong>扁平 input-item</strong> 列表，工具是<strong>扁平</strong> <code>{type:&quot;function&quot;,…}</code>，外加一档 <code>reasoning.effort</code>。</li><li>工具调用/结果是<strong>独立 item</strong>（<code>function_call</code> / <code>function_call_output</code>），而非 Anthropic 那样嵌在 message 里的内容块——这解释了前几章 <code>messages</code> 为何长那样。</li><li>reasoning 是协议一等公民：请求里调力度、响应里单独成 item，于是「想了什么」能被流式、被回放、被纳入压缩（<a href="../s07_context_compaction/index.html">s07</a>）与 rollout（<a href="../s08_rollout/index.html">s08</a>）。</li><li>协议跟随模型：各用自家 API 与自家工具形状，和 <a href="../s03_apply_patch/index.html">s03</a> 里 apply_patch 跟随模型是同一个道理。</li><li><strong>生产级</strong>：模型调用是会抖的网络流——可重试错误走指数退避 + 抖动（避免重试风暴）、honor 服务端 Retry-After、封顶 <code>max_retries</code>、耗尽再做 WebSocket→HTTPS 传输回退；致命错误（鉴权）零重试；上下文超限是&quot;先压缩再重试&quot;而非单纯重发（见「生产级」一节）。</li><li>下一站 <a href="../s10_sq_eq_protocol/index.html">s10 SQ/EQ 协议</a>：Responses 流式吐出的这些 item/事件，harness 内部怎么用一套 <strong>SQ（提交队列）/ EQ（事件队列）</strong> 收发、把「模型推理 → 工具调用 → 审批 → 结果」串成有序的事件流。</li></ul>
+<h2 id="思考">思考</h2>
+<div class="think">
+<ol><li>Responses 把&quot;工具调用/结果&quot;做成独立 item，Anthropic 把它们做成 message 里的内容块。哪种更适合&quot;流式地穿插多个工具调用&quot;？为什么？</li><li>reasoning 作为协议一等公民，意味着模型的&quot;思考过程&quot;会回到上下文里。这对调试好在哪？对 token 成本和隐私又意味着什么？</li><li>如果明天要给 <a href="../codexlib.py">codexlib.py</a> 加一个 Anthropic 后端（让 Codex 的 harness 去跑 Claude），你得改哪几处？哪些属于&quot;协议形状&quot;差异、哪些属于&quot;模型习惯&quot;差异（回想 <a href="../s03_apply_patch/index.html">s03</a>）？</li><li>WebSocket + prewarm + 粘性路由都是为了什么？教学版省掉它们，是功能少了，还是只是慢一点、贵一点？</li><li>重试用抖动来避免&quot;重试风暴&quot;。可如果故障是服务端<strong>彻底挂了</strong>（不是过载），指数退避+抖动只是让一群客户端&quot;慢一点、但仍持续地&quot;敲它。光靠客户端退避够吗？还需要什么？（提示：断路器 circuit breaker——连续失败到某个阈值就<strong>直接快速失败一段时间</strong>，根本不发请求。想想 <a href="../s14_guardian/index.html">s14</a> 的熔断器是不是同一个思想。）</li></ol>
+</div>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>
