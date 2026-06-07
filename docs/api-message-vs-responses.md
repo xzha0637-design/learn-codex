@@ -1,5 +1,7 @@
 # 超长篇：Claude Code 的 Messages API 与 Codex 的 Responses API 全解
 
+> 🌐 [English](api-message-vs-responses.en.md) · **中文**
+
 > 这是一篇深入长文，面向**只有些许基础**的读者。我们从「什么是线协议」讲起，把两套系统递给模型的**那张单子**逐格摊开——请求怎么拼、响应怎么拆、工具怎么编码、推理怎么携带、状态放在谁那、流式长什么样、失败怎么报——并解释**为什么**它们长得不一样。
 >
 > 事实依据：Codex 来自本仓库的真源码 `../../codex/codex-rs`，每个字段/常量都能查到文件行号；Claude Code（下称 CC）走的 **Anthropic Messages API** 是一套**公开、有文档**的协议，本文据其公开规范与 [learn-claude-code](../../learn-claude-code/) 的源码剖析撰写。

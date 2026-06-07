@@ -1,5 +1,7 @@
 # 超长篇：Claude Code 与 Codex 的「子代理与多智能体」全解
 
+> 🌐 [English](subagent-multiagent-cc-vs-codex.en.md) · **中文**
+
 > 接着[上下文那篇](context-cc-vs-codex.md)，这篇拆另一个大主题：当**一个 agent 不够用**时，两套系统怎么"分身"（subagent）和"组队"（multi-agent）——以及为什么 CC 走向"文件系统里的队友团"，Codex 走向"有身份、有图谱、能上云、能被调用的线程网络"。
 >
 > 事实依据：Codex 来自真源码 `../../codex/codex-rs`；CC 来自 [learn-claude-code](../../learn-claude-code/) 对 `AgentTool.tsx` / `runAgent.ts` / `forkSubagent.ts` / 团队章节的剖析。

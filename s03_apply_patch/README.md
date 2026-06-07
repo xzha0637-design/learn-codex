@@ -1,5 +1,7 @@
 # s03: apply_patch — Codex 怎么改文件
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"把'改动'表达成一个结构化补丁信封，一次调用增/改/删/移多个文件。"*
 
 [learn-codex 总览](../README.md) · [工具与分发](../s02_tool_use/) → **apply_patch** → [审批策略](../s04_approval/)

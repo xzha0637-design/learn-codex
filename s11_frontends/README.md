@@ -1,5 +1,7 @@
 # s11: Frontends — 前端只是事件流的消费者（TUI + exec）
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"一个 core 产出一条事件流；前端不含业务，只是这条流的消费者。终端、CI、IDE 各取所需。"*
 
 [learn-codex 总览](../README.md) · [s10 SQ/EQ 协议](../s10_sq_eq_protocol/) → **s11 前端：TUI + exec** → [s12 更多工具](../s12_tools_extra/)

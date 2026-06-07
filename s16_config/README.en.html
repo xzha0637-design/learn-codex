@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s16: Config — Layered resolution and named profiles</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../README.en.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s16-config-layered-resolution-and-named-profiles">s16: Config — Layered resolution and named profiles</h1>
+<blockquote>🌐 <strong>English</strong> · <a href="index.html">中文版</a></blockquote>
+<blockquote><em>&quot;One switch flips an entire posture of autonomy: cautious in prod, unleashed in a throwaway repo.&quot;</em></blockquote>
+<p><a href="../README.en.html">learn-codex overview</a> · <a href="../s15_mcp/README.en.html">s15 MCP</a> → <strong>s16</strong> → <a href="../s17_comprehensive/README.en.html">s17 Comprehensive: mini Codex</a></p>
+<hr>
+<h2 id="get-the-idea-straight-first-why-behavior-shouldnt-be-hardcoded-but-stacked-up-in-layers">Get the idea straight first: why behavior shouldn&#x27;t be hardcoded, but &quot;stacked up in layers&quot;</h2>
+<p>By this chapter, Codex has accumulated a big pile of tunable knobs: which model to use, how strict approval is (<a href="../s04_approval/README.en.html">s04</a>), how far open the sandbox goes (<a href="../s05_sandbox/README.en.html">s05</a>), which MCP servers to mount (<a href="../s15_mcp/README.en.html">s15</a>)… If you only think of &quot;config&quot; as &quot;a file with settings written in it,&quot; you&#x27;ll miss the part where Codex is genuinely clever. What it&#x27;s really solving is a deeper problem: <strong>the same agent should have completely different &quot;nerve&quot; in different scenarios, and that nerve can&#x27;t be hardcoded — it also has to switch in a second, and it has to let enterprises clamp down from above.</strong> Once you grasp the three ideas below, this seemingly fussy mechanism becomes obvious at a glance.</p>
+<p><strong>Idea one: &quot;what value to use&quot; depends heavily on where you are and what you&#x27;re doing — so it can&#x27;t be hardcoded.</strong> Editing someone else&#x27;s code in your company&#x27;s prod repo, what you want is: strict approval, tight sandbox, a stable model — the cost of an incident is too high. But running an experiment in a one-shot throwaway repo under your own <code>/tmp</code>, you want exactly the opposite: don&#x27;t ask me about every single command, give me full permissions, crank the reasoning all the way up — what I want is speed. <strong>Same agent, two scenarios, and almost every single setting should be the reverse.</strong> Hardcode any one set of values into the program, and it&#x27;s guaranteed to get in the way in the other scenario. The first reason config exists is to pull &quot;behavior&quot; out of the code and turn it into something you can swap per scenario.</p>
+<p><strong>Idea two: instead of assembling a long string of flags every time, package &quot;a whole scenario&quot; into one name.</strong> Even if the values can live outside the code, if they&#x27;re scattered across a dozen command-line flags, every time you switch scenarios you have to type out a long string of <code>--approval … --sandbox … --model …</code> — hard to remember, and easy to get half of it wrong (you opened the sandbox up but forgot to turn approval back on). The clever move is to package &quot;a whole scenario&#x27;s worth of config&quot; together and give it a name — this is a <strong>profile</strong>: a profile named <code>safe</code> has &quot;require approval + can only write files in the workspace&quot; baked in, and one named <code>yolo</code> has &quot;no approval + everything allowed&quot; baked in. Switching scenarios now takes just a name — <code>--profile safe</code> or <code>--profile yolo</code>. It&#x27;s like your phone&#x27;s &quot;scenes&quot;: &quot;meeting mode&quot; mutes and turns on vibration with one tap, and you don&#x27;t go turn off the ringer and turn on vibration one by one. <strong>A profile is the agent&#x27;s scene; it bundles a set of &quot;autonomy dials&quot; into a single switch.</strong></p>
+<p><strong>Idea three (the most important): the same setting gets written by several places — who wins? Make the sources &quot;layered,&quot; and a later write covers an earlier one.</strong> Now that we have profiles, a new problem pops up: for the single item &quot;which model,&quot; the system ships a default value, your config file <code>config.toml</code> (a settings format meant to be hand-written by humans, like <code>model = &quot;gpt-5-codex&quot;</code>, sparing you the quotes and braces of JSON) writes one, the profile you picked writes another, and at this launch you also want to temporarily swap in yet another on the command line — <strong>which one actually counts?</strong> Codex&#x27;s answer is clean and crisp: arrange these sources <strong>into a few layers from low to high</strong>, and <strong>a later layer covers an earlier one</strong> (the industry calls this <em>last-wins</em>). It&#x27;s like a stack of transparent sheets looked at top-down — where the upper sheet has writing it blocks the one below, and where it&#x27;s blank (transparent) the lower layer shows through. But &quot;stacking&quot; isn&#x27;t crudely replacing the whole layer; it&#x27;s a <strong>field-by-field merge</strong> (deep-merge): where the upper layer wrote something, use the upper layer&#x27;s; where it didn&#x27;t mention something, keep the lower layer&#x27;s; and when you hit &quot;settings nested inside settings,&quot; drill in and keep merging field by field. So when a profile only wants to change the sandbox and doesn&#x27;t mention the model, the model automatically carries over the lower layer&#x27;s value and isn&#x27;t wiped out. This one layer of &quot;who can cover whom&quot; rules is precisely what gives enterprises the confidence to clamp a &quot;this machine can only be read-only&quot; from the very top.</p>
+<p>Tie the three points together: <strong><code>config.toml</code> holds several profiles; once you pick one, it — together with the system defaults and the command-line overrides — gets layered-resolved via deep-merge under &quot;later layer covers earlier layer&quot; into &quot;the one config that actually takes effect this time.&quot;</strong> One switch (the profile name) flips an entire posture of autonomy — cautious in prod, unleashed in a throwaway repo. This chapter uses 30 lines of Python to lay the whole mechanism out for you, right down to &quot;which layer exactly won for each field.&quot;</p>
+<h2 id="problem">Problem</h2>
+<p>By this chapter, Codex has piled up a big bunch of tunable knobs: which model to use, how strict the approval policy is (<a href="../s04_approval/README.en.html">s04</a>), how far open the sandbox goes (<a href="../s05_sandbox/README.en.html">s05</a>), how much reasoning effort, which MCP servers to mount (<a href="../s15_mcp/README.en.html">s15</a>)…</p>
+<p>But &quot;what value to use&quot; <strong>depends heavily on where you are and what you&#x27;re doing</strong>:</p>
+<ul><li>Editing someone else&#x27;s code in your company&#x27;s prod repo: strict approval, tight sandbox, a stable model — the cost of an incident is high.</li><li>Running an experiment in a one-shot throwaway repo under your own <code>/tmp</code>: don&#x27;t ask me about every single command, give me full permissions, crank the reasoning all the way up — what I want is speed.</li></ul>
+<p>If these values are scattered across a dozen command-line flags, every time you switch scenarios you have to type out a long string of <code>--approval … --sandbox … --model …</code>, hard to remember and easy to mistype. Worse: the values may come from multiple places — the <code>config.toml</code> you wrote, the policy your enterprise pushes down, the <code>-c</code> you tacked on for just this launch — <strong>which one takes effect?</strong> Without a clear precedence rule, config is a tangled mess.</p>
+<h2 id="solution">Solution</h2>
+<p>Two things: <strong>named profiles</strong> package &quot;a whole scenario&#x27;s config&quot; into one name; <strong>layered resolution</strong> uses one explicit precedence chain to merge multiple sources into one effective config — <strong>a later layer covers an earlier one (last-wins)</strong>.</p>
+<pre><code>   低优先级 ───────────────────────────────────────────▶ 高优先级
+   ┌──────────┐  ┌──────────────┐  ┌───────────────┐  ┌──────────┐
+   │ DEFAULTS │→ │ config.toml  │→ │ 选中的 profile │→ │ 运行时    │
+   │ 系统默认  │  │ 顶层（你的全局）│  │ safe / yolo … │  │ 覆盖(-c)  │
+   └──────────┘  └──────────────┘  └───────────────┘  └──────────┘
+        每一层只覆盖它显式写了的字段，其余沿用下层 —— deep-merge
+
+   profile = &quot;safe&quot;                    profile = &quot;yolo&quot;
+   ┌─────────────────────────┐         ┌─────────────────────────┐
+   │ approval = untrusted     │         │ approval = never         │
+   │ sandbox  = workspace-write│        │ sandbox  = danger-full   │
+   │  → prod / 别人的仓库      │         │  → 一次性草稿仓           │
+   └─────────────────────────┘         └─────────────────────────┘</code></pre>
+<p>Switching scenarios now takes just a name: <code>--profile safe</code> or <code>--profile yolo</code>.</p>
+<h2 id="how-it-works">How it works</h2>
+<p>Look at <a href="code.py">code.py</a>, three pieces:</p>
+<p><strong>Step 1 — get the config with zero dependencies.</strong> Prefer the standard library <code>tomllib</code> (3.11+) to read <code>config.toml</code>; if the environment doesn&#x27;t have it (or there&#x27;s no file), fall back to an embedded sample dict — <strong>never pull in a pip dependency</strong>:</p>
+<pre><code class="language-python">try:
+    import tomllib            # Python 3.11+
+except ImportError:
+    tomllib = None            # 退回内嵌 SAMPLE_CONFIG</code></pre>
+<p>The shape of <code>SAMPLE_CONFIG</code> is deliberately aligned with the real source&#x27;s <code>ConfigToml</code>: top-level defaults + a <code>profiles</code> map + a <code>profile</code> (which one to pick by default). The two profiles&#x27; field values are aligned with the real enums too — <code>approval_policy ∈ {untrusted, on-failure, on-request, never}</code> (<code>AskForApproval</code>), <code>sandbox_mode ∈ {read-only, workspace-write, danger-full-access}</code> (<code>SandboxMode</code>).</p>
+<p><strong>Step 2 — deep-merge: overlay wins.</strong> This is exactly the semantics of <code>merge_toml_values</code> in <a href="../../codex/codex-rs/config/src/merge.rs"><code>merge.rs</code></a> — if both sides are tables, merge recursively; otherwise the overlay covers the whole thing:</p>
+<pre><code class="language-python">def deep_merge(base, overlay):
+    out = dict(base)
+    for key, val in overlay.items():
+        if isinstance(val, dict) and isinstance(out.get(key), dict):
+            out[key] = deep_merge(out[key], val)   # 嵌套表递归
+        else:
+            out[key] = val                          # 标量：overlay 直接盖
+    return out</code></pre>
+<p><strong>Step 3 — <code>resolve()</code> stacks four layers and records, for each field, &quot;which layer won.&quot;</strong> This provenance (source tracking) is the highlight of this chapter — it turns &quot;last-wins&quot; from an abstract rule into something visible to the naked eye:</p>
+<pre><code class="language-python">eff = dict(DEFAULTS)                              # 第0层：系统默认
+eff = lay(eff, top, &quot;config.toml&quot;)               # 第1层：config.toml 顶层
+eff = lay(eff, prof, f&quot;profile:{chosen}&quot;)        # 第2层：选中的 profile
+eff = lay(eff, overrides, &quot;override&quot;)            # 第3层：运行时覆盖（最高）</code></pre>
+<p><code>--demo</code> resolves the two profiles <code>safe</code> and <code>yolo</code>, prints field by field &quot;effective value + which layer it came from,&quot; and adds a &quot;yolo + runtime override of model&quot; block to demonstrate how the highest layer covers the value the profile gave (last-wins). <code>PROFILE_FIELDS</code> restricts a profile to only cover the fields it&#x27;s supposed to — corresponding to the real <code>ConfigProfile</code>&#x27;s <code>#[serde(deny_unknown_fields)]</code>.</p>
+<p><strong>Walk through it</strong>: follow one <code>resolve(cfg, &quot;yolo&quot;, overrides={&quot;model&quot;: &quot;gpt-5-codex-mini&quot;})</code> and watch the &quot;four sheets&quot; stack up the final config one by one. We keep our eyes on a single field, <code>model</code>, watching what it gets written to at each layer and who wins in the end.</p>
+<p>Layer 0 <strong>DEFAULTS</strong> (system defaults, the bottom sheet) — every field has a fallback value:</p>
+<pre><code class="language-python">{&quot;model&quot;: &quot;gpt-5-codex&quot;, &quot;approval_policy&quot;: &quot;on-request&quot;,
+ &quot;sandbox_mode&quot;: &quot;read-only&quot;, &quot;model_reasoning_effort&quot;: &quot;medium&quot;}
+# provenance: 此刻每个字段都记成 &quot;default&quot;</code></pre>
+<p>Layer 1 <strong>config.toml top level</strong> — the top level of <code>SAMPLE_CONFIG</code> only writes one <code>model</code> (bumping the default model up a notch), nothing else:</p>
+<pre><code class="language-python">overlay = {&quot;model&quot;: &quot;gpt-5-codex-high&quot;}     # 只有这一个字段
+# deep-merge 后 model 变成 gpt-5-codex-high；其余沿用第 0 层（胶片没盖到的地方露出下层）
+# provenance[&quot;model&quot;] = &quot;config.toml&quot;</code></pre>
+<p>Layer 2 <strong>profile = yolo</strong> — this is what the <code>yolo</code> sheet writes (note it <strong>does not write</strong> <code>model</code>):</p>
+<pre><code class="language-python">{&quot;approval_policy&quot;: &quot;never&quot;, &quot;sandbox_mode&quot;: &quot;danger-full-access&quot;,
+ &quot;model_reasoning_effort&quot;: &quot;high&quot;}
+# 它改了 approval / sandbox / reasoning 三项；model 这一格是透明的 → 仍露出第 1 层的 gpt-5-codex-high
+# provenance: approval_policy→&quot;profile:yolo&quot;, sandbox_mode→&quot;profile:yolo&quot;, model_reasoning_effort→&quot;profile:yolo&quot;</code></pre>
+<p>Layer 3 <strong>runtime override</strong> (the topmost sheet, highest precedence) — at this launch we temporarily pass <code>{&quot;model&quot;: &quot;gpt-5-codex-mini&quot;}</code>:</p>
+<pre><code class="language-python">{&quot;model&quot;: &quot;gpt-5-codex-mini&quot;}
+# model 被这张最高层胶片盖成 gpt-5-codex-mini —— 第 1 层写的 high 被压在下面看不见了
+# provenance[&quot;model&quot;] = &quot;override&quot;   ← model 的归属从 config.toml 变成了 override</code></pre>
+<p><strong>Why the result comes out this way</strong>: <code>model</code> got written three times along the way (default→config.toml→override), but provenance finally records <code>override</code>, because it&#x27;s the highest layer and the last to touch this field — that&#x27;s last-wins. Whereas <code>approval_policy</code> was only written by the <code>yolo</code> layer, so it belongs to <code>profile:yolo</code>. The final block ③ that <code>--demo</code> prints is exactly:</p>
+<pre><code>字段                    生效值                来自哪一层
+model                   gpt-5-codex-mini      override        ← 被运行时覆盖盖掉
+approval_policy         never                 profile:yolo
+sandbox_mode            danger-full-access    profile:yolo
+model_reasoning_effort  high                  profile:yolo</code></pre>
+<p>Once you understand this table, you understand the whole layered config: <strong>each field independently &quot;counts upward to the last layer that wrote it,&quot; and that layer&#x27;s value is the effective value.</strong></p>
+<h2 id="production-grade-validate-at-the-boundary-reject-bad-config-at-load-time-dont-drag-it-to-runtime">Production-grade: validate at the boundary — reject bad config at load time, don&#x27;t drag it to runtime</h2>
+<p>Layered resolution is elegant, but it has a hidden hazard: what happens if a profile writes <code>approval_policy = &quot;yolo-mode&quot;</code> (a tier that doesn&#x27;t exist), or spells the field name as <code>sandbox_modee</code>? A lenient parser will <strong>silently accept it</strong> — and then your agent sets off carrying an approval policy nobody recognizes, only to discover it when runtime behavior gets weird. The production-grade answer is: <strong>validate strictly at the loading boundary, reject bad config on the spot, and report clearly what&#x27;s wrong.</strong></p>
+<p>Real Codex uses two weapons (both at the type level):</p>
+<ul><li><strong><code>#[serde(deny_unknown_fields)]</code></strong>: a misspelled field name (<code>sandbox_modee</code>) isn&#x27;t quietly ignored, it makes the parse fail outright.</li><li><strong>typed enum</strong>: the type of <code>approval_policy</code> is the <code>AskForApproval</code> enum, so <code>&quot;yolo-mode&quot;</code> simply can&#x27;t deserialize into it — an illegal value is blocked at load time.</li></ul>
+<p>This chapter&#x27;s <code>validate_profile</code> makes this pedagogical, and <code>--demo</code> takes a profile with three errors at once to demonstrate:</p>
+<pre><code>✗ profile &#x27;typo&#x27;: `approval_policy`=&#x27;yolo-mode&#x27; 非法（合法：[&#x27;never&#x27;,&#x27;on-failure&#x27;,&#x27;on-request&#x27;,&#x27;untrusted&#x27;]）
+✗ profile &#x27;typo&#x27;: 未知字段 `sandbox_modee`（合法：[&#x27;approval_policy&#x27;,&#x27;model&#x27;,&#x27;model_reasoning_effort&#x27;,&#x27;sandbox_mode&#x27;]）
+✗ profile &#x27;typo&#x27;: `model_reasoning_effort`=&#x27;extreme&#x27; 非法（合法：[&#x27;high&#x27;,&#x27;low&#x27;,&#x27;medium&#x27;]）</code></pre>
+<blockquote>In one sentence: config is the <strong>master switch for the safety tiers</strong> (it decides which approval tier, how big the sandbox opens) — precisely because it&#x27;s this critical, the more you want to weld it shut at the boundary: <strong>better to fail at load than to run with a wrong safety config.</strong> This is the same &quot;when in doubt, fail toward safety&quot; engineering instinct as the sandbox&#x27;s deny-default and approval&#x27;s fail-closed.</blockquote>
+<h2 id="-how-it-differs-from-claude-code">🆚 How it differs from Claude Code</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>Config file</td><td><code>settings.json</code> (JSON)</td><td><code>config.toml</code> (TOML) ⭐</td></tr><tr><td>Switch scenarios</td><td>edit settings / command-line args</td><td><strong>named profile</strong>: one name packages a whole set (model + approval + sandbox + …)</td></tr><tr><td>Source synthesis</td><td>merge settings items</td><td><strong>explicit layered stack</strong>: system → cloud → user → thread, last-wins layer by layer</td></tr><tr><td>One-tap autonomy switch</td><td>rather scattered</td><td><code>--profile safe</code> / <code>--profile yolo</code> flips cautious / unleashed in a second</td></tr></tbody></table>
+<p><strong>Why does Codex build this whole layering + profile setup?</strong> Because its running scenarios are far wider than &quot;single-person local interaction&quot; — the same core has to run in a local terminal, in CI, in the cloud, and may also be constrained by enterprise policy. This kind of environment is inherently <strong>multi-source</strong>:</p>
+<ul><li><strong>The enterprise has to be able to clamp a layer from above</strong>: the policy the admin pushes down (the real system / cloud layers) must be able to cover the user&#x27;s casual settings, otherwise in a managed environment there&#x27;s no way to enforce &quot;this machine can only be read-only.&quot; The layered stack provides this capability.</li><li><strong>Autonomy has to be switchable with one tap</strong>: Codex bets on low-intervention autonomous running, and &quot;how autonomous it should be&quot; depends heavily on the scenario. A profile bundles the &quot;autonomy dials&quot; of <code>approval + sandbox + model</code> into one name — <code>safe</code> for prod, <code>yolo</code> for the throwaway repo, no need to manually assemble a long string of flags each time, and no getting half of it wrong.</li><li><strong>Runtime still has to be able to clamp a temporary layer</strong>: want to swap the model for just this launch? <code>-c model=…</code> goes on as the highest layer without touching your <code>config.toml</code>.</li></ul>
+<p>This is consistent with the whole course&#x27;s through-line: Claude Code centers on <strong>interactive UX</strong>, config just needs to be good enough and pops up a dialog on the spot; Codex bets on <strong>headless / CI / cloud</strong>, so it makes &quot;who can cover whom&quot; into an <strong>explicit, enterprise-takeover-able, one-tap-autonomy-switchable</strong> layered system.</p>
+<h2 id="deep-dive-the-teaching-version-vs-real-codex-source">Deep dive: the teaching version vs. real Codex source</h2>
+<p>The teaching version <code>resolve()</code> is about 30 lines, four layers. Real Codex&#x27;s config subsystem is <code>codex-rs/config/</code> (<code>types.rs</code> alone is 35,000+ lines, <code>config_requirements.rs</code> 120,000 lines), and the four blocks below make the gaps clear.</p>
+<details>
+<summary>1. The real layer stack: system → cloud → user → thread, plus enterprise MDM</summary>
+<p>The teaching version&#x27;s four layers (DEFAULTS → config.toml → profile → override) are a simplification of the real layer stack. The real <code>ConfigLayerStack</code> (<code>config/src/state.rs:236</code>) has a very blunt comment:</p>
+<pre><code class="language-rust">/// Layers are listed from lowest precedence (base) to highest (top),
+/// so later entries in the Vec override earlier ones.   ← 和教学版 last-wins 完全一致
+layers: Vec&lt;ConfigLayerEntry&gt;,</code></pre>
+<p>Each layer has a source tag <code>ConfigLayerSource</code> (<code>state.rs</code>):</p>
+<table><thead><tr><th>Layer (low→high precedence)</th><th><code>ConfigLayerSource</code> variant</th><th>Who wrote it</th></tr></thead><tbody><tr><td>Enterprise MDM / managed</td><td><code>Mdm</code> / <code>EnterpriseManaged</code></td><td>device management policy, user <strong>cannot</strong> override</td></tr><tr><td>System</td><td><code>System { file }</code></td><td>system-level config</td></tr><tr><td>Cloud-pushed</td><td>(<code>cloud_config_layers</code>)</td><td>fragments pushed by Codex Web / the org</td></tr><tr><td>User</td><td><code>User { file, profile }</code></td><td>your <code>$CODEX_HOME/config.toml</code> (<strong>includes the profile sub-layer</strong>)</td></tr><tr><td>Project</td><td><code>Project { dot_codex_folder }</code></td><td>the <code>.codex/</code> in the repo</td></tr><tr><td>Session flags</td><td><code>SessionFlags</code></td><td>this launch&#x27;s <code>-c</code> / CLI overrides (highest)</td></tr></tbody></table>
+<p>Note the <code>User</code> layer actually <strong>splits into two sub-layers</strong>: the base <code>config.toml</code> + the selected profile&#x27;s override (which is why the code records a <code>user_layer_index</code> pointing at the writable layer). The teaching version splitting &quot;config.toml top level&quot; and &quot;profile&quot; into two layers is exactly imitating this. <code>merge_toml_values</code> is then the function that does the real work when merging layer by layer (the teaching version&#x27;s <code>deep_merge</code> copies it).</p>
+</details>
+<details>
+<summary>2. What a profile can actually hold: the full field panorama of ConfigProfile</summary>
+<p>The teaching version&#x27;s <code>PROFILE_FIELDS</code> only puts in 4 fields (model / approval / sandbox / reasoning_effort). The real <code>ConfigProfile</code> (<code>config/src/profile_toml.rs:24</code>) can package far more:</p>
+<pre><code class="language-rust">pub struct ConfigProfile {
+    pub model: Option&lt;String&gt;,
+    pub model_provider: Option&lt;String&gt;,
+    pub approval_policy: Option&lt;AskForApproval&gt;,     // ← 教学版有
+    pub sandbox_mode: Option&lt;SandboxMode&gt;,           // ← 教学版有
+    pub model_reasoning_effort: Option&lt;ReasoningEffort&gt;,
+    pub model_reasoning_summary: Option&lt;ReasoningSummary&gt;,
+    pub model_verbosity: Option&lt;Verbosity&gt;,
+    pub web_search: Option&lt;WebSearchMode&gt;,
+    pub tools: Option&lt;ToolsToml&gt;,
+    pub features: Option&lt;FeaturesToml&gt;,              // ← 见下一块「feature flags」
+    pub personality: Option&lt;Personality&gt;,
+    // …还有十几个
+}</code></pre>
+<p>Every field is an <code>Option&lt;T&gt;</code>: <strong><code>None</code> means &quot;this profile doesn&#x27;t manage this item,&quot;</strong> so during merge the field carries over the lower layer&#x27;s value — this is exactly the semantics the teaching version&#x27;s <code>lay()</code> is trying to express with &quot;only record into provenance the fields the layer actually wrote.&quot; <code>#[serde(deny_unknown_fields)]</code> then guarantees you can&#x27;t stuff random keys into a profile (the teaching version simulates this with the <code>PROFILE_FIELDS</code> allowlist).</p>
+</details>
+<details>
+<summary>3. sandbox + approval + model + mcp_servers all live in config</summary>
+<p>Worth calling out specially: the &quot;config entry points&quot; for all those mechanisms in the previous chapters ultimately funnel into the single <code>ConfigToml</code> (<code>config/src/config_toml.rs:139</code>) structure:</p>
+<table><thead><tr><th>Config item</th><th>Field</th><th>Corresponding chapter</th></tr></thead><tbody><tr><td>which model to use</td><td><code>model: Option&lt;String&gt;</code></td><td>s09</td></tr><tr><td>approval policy</td><td><code>approval_policy: Option&lt;AskForApproval&gt;</code></td><td>s04</td></tr><tr><td>sandbox tier</td><td><code>sandbox_mode: Option&lt;SandboxMode&gt;</code></td><td>s05</td></tr><tr><td>permission profile</td><td><code>permissions</code> / <code>permission_profile</code></td><td>s05 / s14</td></tr><tr><td>MCP server</td><td><code>mcp_servers: HashMap&lt;String, McpServerConfig&gt;</code></td><td>s15</td></tr><tr><td>named profile</td><td><code>profiles: HashMap&lt;String, ConfigProfile&gt;</code></td><td>this chapter</td></tr><tr><td>which profile to pick by default</td><td><code>profile: Option&lt;String&gt;</code></td><td>this chapter</td></tr></tbody></table>
+<p>That is: <strong>config isn&#x27;t the settings of some isolated module, it&#x27;s the bus for the entire agent&#x27;s behavior</strong>. The teaching version only demonstrates the layering of the four fields model / approval / sandbox / reasoning, but the same layering rules apply equally to nested tables like <code>mcp_servers</code> (<code>deep_merge</code> recurses in to merge) — which is also why the real version goes to the trouble of implementing &quot;recursive table merge&quot; instead of simple wholesale replacement.</p>
+</details>
+<details>
+<summary>4. ThreadSettings: override config at runtime, without restarting (continues from s10)</summary>
+<p>The teaching version&#x27;s &quot;layer 3 override&quot; is a static dict. In the real version, changing config at runtime is an <strong><code>Op</code></strong> (continuing the SQ/EQ protocol from <a href="../s10_sq_eq_protocol/README.en.html">s10</a>, <code>protocol.rs:492</code>):</p>
+<pre><code class="language-rust">Op::ThreadSettings {
+    thread_settings: ThreadSettingsOverrides,   // 改 model / 审批 / 沙箱…
+}
+// core 应用后回一个事件确认：
+EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent)</code></pre>
+<p>This is the true identity of the thread layer (highest precedence): when you switch the model or relax approval <strong>partway through</strong> a session, the frontend submits an <code>Op::ThreadSettings</code>, the core merges it as the highest layer into the effective config and returns a <code>ThreadSettingsApplied</code> event, <strong>without restarting the session</strong>. The teaching version has no queue, so it flattens this into &quot;pass an <code>overrides</code> dict to <code>resolve()</code>&quot; — but the precedence position (covering the profile and config.toml) matches the real version.</p>
+<p>To string it together in one sentence: <strong><code>config.toml</code> + profile define &quot;the initial values at session start,&quot; and <code>Op::ThreadSettings</code> is &quot;the temporary rewrite mid-session,&quot;</strong> both landing at different heights on the same layered stack.</p>
+</details>
+<h2 id="run">Run</h2>
+<pre><code class="language-bash">python s16_config/code.py --demo   # 解析 safe / yolo，逐字段打印「哪层赢了」（无需 key，离线）
+python s16_config/code.py          # 交互模式：输入 profile 名，看生效配置</code></pre>
+<p>No external dependencies: uses the standard library <code>tomllib</code> (3.11+); if the environment doesn&#x27;t have it, it automatically falls back to the embedded sample config.</p>
+<h2 id="recap">Recap</h2>
+<ul><li>Config comes from multiple sources, synthesized with one <strong>explicit precedence chain</strong>: DEFAULTS → config.toml → profile → runtime override, <strong>a later layer covers an earlier one (last-wins)</strong>, stacked layer by layer via deep-merge.</li><li><strong>Named profiles</strong> package &quot;a whole autonomy config&quot; into one name — <code>safe</code> (require approval + workspace write) / <code>yolo</code> (no approval + full permissions) switch in a second.</li><li>Real Codex&#x27;s layer stack is thicker: <strong>system / enterprise MDM → cloud → user(config.toml + profile) → project → session flags</strong>; <code>ConfigProfile</code> can package over a dozen fields; <code>mcp_servers</code>, <code>approval</code>, <code>sandbox</code>, <code>model</code> all funnel into the same <code>ConfigToml</code>.</li><li>Changing config at runtime is an <code>Op::ThreadSettings</code> (continuing <a href="../s10_sq_eq_protocol/README.en.html">s10</a>), landing at the top of the layer stack, no restart needed.</li><li><strong>Production-grade</strong>: config is the master switch for the safety tiers, and must be strictly validated at the load boundary — <code>deny_unknown_fields</code> (a misspelled field errors out directly) + typed enum (an illegal enum value fails to deserialize), bad config is rejected on the spot, never silently taking effect (see the &quot;Production-grade&quot; section).</li><li>Next stop <a href="../s17_comprehensive/README.en.html">s17</a>: assembling the mechanisms from the first 16 chapters into one complete mini Codex.</li></ul>
+<h2 id="think-it-over">Think it over</h2>
+<ol><li>The teaching version&#x27;s &quot;later layer covers earlier layer&quot; is simple and clear. But in the real version the enterprise MDM layer is one of the <strong>lowest</strong> precedence and yet &quot;the user cannot override it&quot; — these two things look contradictory, so how does Codex pull off &quot;enterprise policy both participates in the merge and can&#x27;t be overturned by the user&quot;? If it were up to you to design, should constraints (non-overridable) and defaults (overridable) be expressed with the same layering mechanism?</li></ol>
+<ol><li>A profile bundles <code>approval + sandbox + model</code> into one name, and switching is great. But &quot;bundling&quot; also means you might <strong>only want to change the sandbox, yet swap approval along with it by accident</strong>. Once a preset like <code>yolo</code> (&quot;no approval + full permissions&quot;) gets used in a real repo by a slip of the hand… how would you backstop this convenience-vs-safety tension — should you add a second confirmation to dangerous profiles?</li></ol>
+<ol><li>This chapter prefers <code>tomllib</code> for TOML and falls back to an embedded dict, for the sake of zero dependencies. But the real version&#x27;s config subsystem is so huge that <code>config_requirements.rs</code> has 120,000 lines — why does a &quot;read config&quot; matter balloon into this? When config has to support &quot;enterprise push + cloud sync + runtime rewrite + strict validation,&quot; where does all the complexity go?</li></ol>
+<ol><li>Claude Code uses <code>settings.json</code>, Codex uses <code>config.toml</code> + layering + profiles. Both are about &quot;letting the user configure the agent,&quot; one leaning lightweight, the other leaning systematic — how much of this difference is the &quot;JSON vs TOML&quot; matter of taste, and how much is the inevitability forced out by &quot;single interactive frontend vs headless/CI/cloud multi-frontend&quot;? If you were building a CI-facing agent, how would you design the config system?</li></ol>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

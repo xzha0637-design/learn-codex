@@ -1,5 +1,7 @@
 # s12: Tools Extra — 更多工具：plan / web_search / view_image，再加几个工具
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"给 agent 加能力，往往不是改循环，而是多注册一个 handler；而在 Codex 里，每个 handler 还要学会'报告自己在干什么'。"*
 
 [learn-codex 总览](../README.md) · [前端：TUI + exec](../s11_frontends/) → **本章** → [Hooks](../s13_hooks/)

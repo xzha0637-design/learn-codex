@@ -1,5 +1,7 @@
 # s09: Responses API — Codex 的线协议
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"不是 Chat Completions，也不是 Anthropic Messages。"*
 
 [learn-codex 总览](../README.md) · [s08 Rollout 续接](../s08_rollout/) → **s09** → [s10 SQ/EQ 协议](../s10_sq_eq_protocol/)

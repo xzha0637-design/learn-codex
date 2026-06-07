@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s03: apply_patch — How Codex Edits Files</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../README.en.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s03-apply_patch-how-codex-edits-files">s03: apply_patch — How Codex Edits Files</h1>
+<blockquote>🌐 <strong>English</strong> · <a href="index.html">中文版</a></blockquote>
+<blockquote><em>&quot;Express an &#x27;edit&#x27; as a structured patch envelope, and add / change / delete / move multiple files in a single call.&quot;</em></blockquote>
+<p><a href="../README.en.html">learn-codex overview</a> · <a href="../s02_tool_use/README.en.html">Tools and dispatch</a> → <strong>apply_patch</strong> → <a href="../s04_approval/README.en.html">Approval policy</a></p>
+<hr>
+<h2 id="get-the-idea-straight-first-why-editing-a-file-is-built-as-a-patch-envelope">Get the idea straight first: why &quot;editing a file&quot; is built as a patch envelope</h2>
+<p>s02 already gave the model a <code>write_file</code>, and it can write any file — so doesn&#x27;t that already solve &quot;editing code&quot;? Just let the model rewrite the whole edited file, right? If you actually do that, you&#x27;ll quickly run into several walls. To understand why Codex steers around this road and goes with the &quot;patch envelope,&quot; lean on the following three escalating reasons.</p>
+<p><strong>Reason one: overwriting the whole file is using a cannon to swat a mosquito — and it causes collateral damage.</strong> You only want to change one line in an 800-line file from <code>timeout=30</code> to <code>timeout=60</code>. If you go through <code>write_file</code>, the model has to <strong>spit all 800 lines back out verbatim</strong>, just to change one of them. There&#x27;s a triple waste and risk here: spitting out 800 lines is slow and burns tokens; while re-copying those 799 lines of unrelated code, the model is very likely to slip and break something you never asked it to touch; and afterward, if you want to know &quot;what exactly did it change,&quot; you have to diff the old and new whole files to see it. <strong>The smaller the change, the more absurd the waste and risk of overwriting the whole file.</strong> What we actually want is to describe only &quot;the tiny bit that changed,&quot; not to haul over the unchanged parts too.</p>
+<p><strong>Reason two: so just describe the &quot;change&quot; — and the most natural &quot;change description&quot; is an envelope that can hold multiple edits.</strong> One way to describe only the change is to do per-spot replacement the way Claude Code does (&quot;swap this old string for this new string&quot;). But real code edits are often <strong>a set of interrelated changes</strong>: add a new file, change two old files, and delete an obsolete file along the way — they&#x27;re really &quot;the same thing.&quot; If you split them into five or ten independent tool calls, that one thing gets scattered, and nothing fully represents &quot;this edit.&quot;</p>
+<p>Codex&#x27;s choice is to <strong>stuff the whole set of changes into one letter</strong>: inside the envelope, each line spells out &quot;add these lines to this file,&quot; &quot;replace this section of that file with that,&quot; &quot;delete this file.&quot; One call, one letter, is one <strong>complete, self-describing change set</strong>. The letter itself looks just like a <code>git diff</code> — and so the benefits pour out automatically: the whole letter can be shown to the user as &quot;this is what you&#x27;re approving&quot; (approval, see <a href="../s04_approval/README.en.html">s04</a>), the whole letter can be archived for the record (rollout, see <a href="../s08_rollout/README.en.html">s08</a>), and the whole letter can be rolled back if something goes wrong. <strong>Making &quot;one edit&quot; into something that can be passed around as a whole is far more valuable than ten scattered calls.</strong></p>
+<p><strong>Reason three (the cleverest): inside the envelope, locating by &quot;content&quot; rather than &quot;line number&quot; is to accommodate a model that miscounts.</strong> The envelope needs to make clear &quot;which section of the file is being changed.&quot; The most obvious idea is to report line numbers — &quot;replace line 42.&quot; But this is a trap for an LLM: <strong>the model can&#x27;t reliably count lines.</strong> It can read code, it can figure out how to change it, but if you ask it to count precisely to &quot;which line is this,&quot; it&#x27;s often off by one or two; and if anyone added or removed a few lines earlier in the file, the line numbers all shift. Pinning the location on line numbers is pinning success or failure on the model&#x27;s weakest ability.</p>
+<p>Codex does the opposite: it locates not by line number but by <strong>quoting a few lines of the original text around that section</strong> as &quot;landmarks&quot; — &quot;between the lines that <code>look like this</code> and <code>look like that</code>, change the line in the middle.&quot; Why is this clever? Because <strong>copying a small snippet of the original text is exactly what the model is best at</strong> (it just read this file). So even if it never got a single line number right from start to finish, the patch-applying program can still take these few landmark lines and <strong>locate that position by content</strong> in the file, cutting precisely.</p>
+<p>An analogy: ask a careless friend to put a bookmark in a book for you. You say &quot;put it on page 213&quot; — he&#x27;ll probably flip to the wrong page. But you say &quot;put it between the sentence &#x27;Once upon a time there was a mountain&#x27; and &#x27;in the mountain there was a temple&#x27;&quot; — he&#x27;ll find it spot-on every time. <strong>Line numbers are deceptive page numbers; context is a recognizable sentence.</strong> What apply_patch bets on is exactly this: the model copies sentences far more reliably than it counts pages. In this chapter, we&#x27;ll hand-implement both the &quot;parsing&quot; of this envelope and the &quot;content-based application&quot; ourselves.</p>
+<h2 id="problem">Problem</h2>
+<p>The model needs to edit code. How do you express &quot;an edit&quot;?</p>
+<ul><li>Use <code>bash</code> + <code>sed</code>/<code>cat &gt; file</code>? Fragile, error-prone, hard to review.</li><li>Do per-spot <code>edit(old_string → new_string)</code> like Claude Code? Precise, but when you need to change 5 files with 3 spots each, that&#x27;s 15 tool calls.</li></ul>
+<p>Codex picked a third road: <strong>a patch envelope.</strong></p>
+<h2 id="solution">Solution</h2>
+<p>The <code>apply_patch</code> tool takes a chunk of marked-up patch text and, in a single call, can add / update / delete / rename multiple files at once:</p>
+<pre><code>*** Begin Patch
+*** Add File: src/hello.py
++print(&quot;hi&quot;)
+*** Update File: README.md
+*** Move to: docs/README.md
+@@
+ # 项目
+-旧的一行
++新的一行
+*** Delete File: legacy.txt
+*** End Patch</code></pre>
+<p>This format has a formal Lark grammar, defined in the real source at <code>codex-rs/apply-patch/src/parser.rs:7-22</code>. Here&#x27;s the marker overview:</p>
+<table><thead><tr><th>Marker</th><th>Meaning</th></tr></thead><tbody><tr><td><code>*** Add File: &lt;path&gt;</code></td><td>Create a new file; every following line starts with <code>+</code></td></tr><tr><td><code>*** Update File: &lt;path&gt;</code></td><td>Modify a file; followed by an optional <code>*** Move to:</code> and several <code>@@</code> blocks</td></tr><tr><td><code>*** Delete File: &lt;path&gt;</code></td><td>Delete a file</td></tr><tr><td><code>*** Move to: &lt;path&gt;</code></td><td>(inside Update) rename</td></tr><tr><td><code>@@ [context]</code></td><td>Locating anchor; afterward <code> </code>=context, <code>-</code>=delete, <code>+</code>=add</td></tr></tbody></table>
+<h2 id="how-it-works">How it works</h2>
+<p>Look at <a href="code.py">code.py</a>, in two parts: <strong>parse</strong> → <strong>apply</strong>.</p>
+<p><strong>Parse</strong> <code>parse_patch(text)</code>: scan line by line; when it hits <code>*** Add/Update/Delete File:</code>, open a hunk. The body of an Update is split by <code>@@</code> into several chunks, where the first character of each line is the tag (<code> </code>/<code>+</code>/<code>-</code>) and the rest is the content.</p>
+<p><strong>Apply</strong> <code>apply_hunk(h)</code>&#x27;s key is the Update&#x27;s &quot;context anchoring&quot; — it locates not by line number but by content:</p>
+<pre><code class="language-python">old = [ln for tag, ln in chunk if tag in (&quot; &quot;, &quot;-&quot;)]   # 文件里现有的样子（上下文+被删）
+new = [ln for tag, ln in chunk if tag in (&quot; &quot;, &quot;+&quot;)]   # 替换后的样子（上下文+新增）
+idx = _find_block(file_lines, old)                     # 按内容找到这一段
+file_lines[idx:idx + len(old)] = new                   # 整段替换</code></pre>
+<p>Because it locates by context rather than line number, the patch still applies even if the model miscounts line numbers — and this is crucial for an LLM. (The teaching version&#x27;s <code>_find_block</code> now also does <code>seek_sequence</code>-style <strong>three-tier fallback matching</strong>: exact → ignore trailing whitespace → ignore leading-and-trailing whitespace, so line-number drift and small discrepancies in indentation / line endings can all be tolerated; see the &quot;Production-grade&quot; section below. The real Codex adds <code>eof</code> anchoring and git-apply-style byte-level leniency on top of this.)</p>
+<p><strong>Walk through it</strong> — using the very example that runs for real with <code>python s03_apply_patch/code.py --demo</code>, watch how &quot;locating by content&quot; happens. First there&#x27;s a file <code>poem.txt</code> (Added in the first step):</p>
+<pre><code>roses are red
+violets are blue
+codex writes patches
+and so can you</code></pre>
+<p>Now the model wants to change line 2, <code>violets are blue</code>, to <code>violets are violet</code>. Note that it <strong>reports no line numbers at all</strong> — the patch envelope it sends looks like this (this is exactly that Update patch in the demo):</p>
+<pre><code>*** Begin Patch
+*** Update File: _demo_workspace/poem.txt
+@@
+ roses are red
+-violets are blue
++violets are violet
+ codex writes patches
+*** End Patch</code></pre>
+<p>The trick to reading this is all in <strong>the first character of each line</strong>: a leading <strong>space</strong> means &quot;this line is a landmark, kept as-is&quot;; <code>-</code> means &quot;delete this line&quot;; <code>+</code> means &quot;add this line.&quot; So the program splits it into two lists —</p>
+<ol><li><strong>&quot;What the file should currently look like&quot;</strong> (landmarks + deleted lines, i.e. the space lines and <code>-</code> lines, with the first character stripped):</li></ol>
+<pre><code class="language-python">   old = [&quot;roses are red&quot;, &quot;violets are blue&quot;, &quot;codex writes patches&quot;]</code></pre>
+<ol><li><strong>&quot;What it should look like after replacement&quot;</strong> (landmarks + added lines, i.e. the space lines and <code>+</code> lines):</li></ol>
+<pre><code class="language-python">   new = [&quot;roses are red&quot;, &quot;violets are violet&quot;, &quot;codex writes patches&quot;]</code></pre>
+<p>Then comes the most crucial step: <code>_find_block(file_lines, old)</code> takes this <code>old</code> string of &quot;landmarks + old lines&quot; and <strong>compares it position by position in the file to find where it appears</strong> — here it matches the three lines starting at line 0. Once found, it <strong>replaces that whole section in the file with <code>new</code></strong>:</p>
+<pre><code class="language-python">idx = _find_block(file_lines, old)        # → 0（按内容找到，全程没用行号）
+file_lines[idx:idx + len(old)] = new      # 第 0~2 行整段替换为 new</code></pre>
+<p>See the cleverness? The model merely <strong>copied the two sentences <code>roses are red</code> and <code>codex writes patches</code> that it just read</strong> as landmarks, sandwiching the line to be changed — it never counted &quot;which line is this.&quot; Even if 10 lines had been added before this poem and the real line numbers had long since drifted, <code>_find_block</code> could still find the position by these two landmark sentences. This is what &quot;Reason three&quot; above looks like in code: <strong>bet on the model copying sentences, not on it counting pages.</strong> (The demo also follows with a second chunk, adding a line after the last sentence <code>and so can you</code> — same idea, located by the <code>and so can you</code> landmark. Run <code>--demo</code> and the file content before and after will both be printed.)</p>
+<h2 id="production-grade-the-patch-wont-apply-was-copied-wrong-fails-midway-how-to-not-crash-and-not-leave-a-half-finished-mess">Production-grade: the patch won&#x27;t apply, was copied wrong, fails midway — how to not crash and not leave a half-finished mess</h2>
+<p>The real difficulty of apply_patch isn&#x27;t &quot;how to apply once the format is right,&quot; but &quot;<strong>what to do when the model writes the patch wrong</strong>&quot; — it&#x27;ll copy the context indentation incorrectly, it&#x27;ll paste a context that doesn&#x27;t exist in the file at all, and one hunk in a patch fails after earlier ones have already been written to disk. Three things, and production-grade has an answer for each (<a href="code.py">code.py</a> implements them all).</p>
+<h3 id="1-fuzzy-matching-tolerate-the-model-copying-whitespace-wrong-seek_sequence-three-tier-fallback">1. Fuzzy matching: tolerate the model copying whitespace wrong (seek_sequence three-tier fallback)</h3>
+<p>The model copies context as landmarks, but often copies trailing spaces and indentation not quite identically. If you require a <strong>character-exact</strong> match, the patch fails to apply for nothing. The real Codex&#x27;s <a href="../../codex/codex-rs/apply-patch/src/seek_sequence.rs"><code>seek_sequence.rs</code></a> uses <strong>three-tier fallback matching</strong> (decreasing strictness): ① exact equality → if not found, ② ignore <strong>trailing</strong> whitespace (<code>rstrip</code>) → if still not found, ③ ignore <strong>leading-and-trailing</strong> whitespace (<code>strip</code>); the earlier the hit, the stricter. This chapter has upgraded <code>_find_block</code> to the same three tiers. The <code>--demo</code> segment ③ deliberately copies the context line with extra trailing spaces — and it applies anyway:</p>
+<pre><code>③ 生产级·模糊匹配：故意把上下文行尾抄出多余空格，照样贴上：
+应用成功:
+M _demo_workspace/poem.txt
+   第 2 行 → violets are PURPLE</code></pre>
+<p>(The real Codex goes even further: <code>eof</code> anchoring, git-apply-style byte-level leniency — but &quot;loosen tier by tier&quot; is the same idea.)</p>
+<h3 id="2-atomicity-either-it-all-applies-or-not-a-single-byte-is-written">2. Atomicity: either it all applies, or not a single byte is written</h3>
+<p>One patch may change five files. If the third hunk&#x27;s context can&#x27;t be found while the first two have already been written to disk, you get a <strong>half-finished mess</strong> — worse than a clean failure (echoing Think it over 2). The production-grade approach is <strong>two-phase commit</strong>: first <strong>simulate</strong> all the changes on an in-memory copy (&quot;prepare&quot;), and only after everything passes do you <strong>write to disk</strong> (&quot;commit&quot;); if any step fails, the disk is left untouched. This chapter&#x27;s <code>apply_patch_tool</code> runs a dry-run pre-check before writing.</p>
+<h3 id="3-error-feedback-hand-the-failure-back-to-the-model-and-let-it-fix-it-itself">3. Error feedback: hand the failure back to the model and let it fix it itself</h3>
+<p>A locating failure shouldn&#x27;t crash the process — instead it should feed <strong>a plain-language error</strong> back to the model as the tool result (exactly the <code>RespondToModel</code> principle from <a href="../s02_tool_use/README.en.html">s02 production-grade</a>; the real Codex&#x27;s <code>ApplyPatchError</code> goes this way too). The <code>--demo</code> segment ④ feeds a patch that won&#x27;t apply:</p>
+<pre><code>④ 生产级·原子性 + 错误回灌：补丁含一个根本不存在的上下文：
+   apply_patch 失败（整封未应用，磁盘未改动）：在 .../poem.txt 找不到上下文 [&#x27;THIS LINE DOES NOT EXIST&#x27;, &#x27;x&#x27;]…；请照抄文件里那几行原文当路标再试。
+   文件未被破坏，第 2 行仍是： violets are PURPLE</code></pre>
+<p>The error string deliberately points out &quot;the whole patch was not applied, the disk was not changed&quot; and gives <strong>what to do next</strong> — so the model reads it and can re-copy the landmarks and retry, instead of staring blankly at a traceback.</p>
+<blockquote>In one sentence: the production-grade of a patch tool is three things — <strong>tolerate wrong copying (fuzzy matching), leave no half-finished mess on failure (atomic), self-correct on error (feedback).</strong></blockquote>
+<h2 id="-how-it-differs-from-claude-code">🆚 How it differs from Claude Code</h2>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>Edit primitive</td><td><code>Edit</code> (precise old→new string replacement), <code>Write</code>, <code>MultiEdit</code></td><td>A single <code>apply_patch</code> patch envelope</td></tr><tr><td>Scope per call</td><td>One spot (MultiEdit: multiple spots in one file)</td><td>Add / change / delete / move across multiple files in one go</td></tr><tr><td>Shape</td><td>String replacement</td><td>Unified-diff-like, inherently reviewable / rollbackable</td></tr><tr><td>Locating</td><td>Requires old_string to be globally unique</td><td><code>@@</code> context anchoring, tolerates line-number drift</td></tr></tbody></table>
+<p><strong>Why the difference? Three reasons:</strong></p>
+<ol><li><strong>The tool has to fit the output habits the model was trained on.</strong> OpenAI trained the <code>apply_patch</code> format directly into the Codex model; Anthropic trained precise string replacement into Claude. Tool design follows &quot;what the model is best at spitting out,&quot; not the other way around.</li><li><strong>Batch + atomic + reviewable.</strong> One patch is one complete, cross-file change set, and is itself a diff — naturally suited to being shown to the user for approval (<a href="../s04_approval/README.en.html">s04</a>), recorded into a rollout (<a href="../s08_rollout/README.en.html">s08</a>), and rolled back as a whole.</li><li><strong>Robust for an LLM.</strong> Context anchoring tolerates the model&#x27;s small errors better than &quot;line numbers&quot; or &quot;requiring a globally unique string.&quot;</li></ol>
+<p><strong>The cost</strong>: the parser is more complex (<a href="../../codex/codex-rs/apply-patch/src/parser.rs">parser.rs</a> has 954 lines), and it&#x27;s sensitive to whether the context matches. Claude&#x27;s string replacement is simpler and more direct. There&#x27;s no silver bullet, only trade-offs.</p>
+<h2 id="deep-dive-teaching-version-vs-the-real-codex-source">Deep dive: teaching version vs the real Codex source</h2>
+<p>The real Codex&#x27;s apply_patch is a standalone crate <a href="../../codex/codex-rs/apply-patch/index.html"><code>apply-patch/</code></a>: <code>parser.rs</code> (954 lines) + <code>lib.rs</code> (1689 lines) + <code>streaming_parser.rs</code> + <code>seek_sequence.rs</code>. The teaching version takes only its skeleton.</p>
+<details>
+<summary>1. Strict parsing vs lenient parsing</summary>
+<p><code>parser.rs</code> has <code>ParseMode::Strict</code> and <code>ParseMode::Lenient</code>. Because the patch format some models (like gpt-4.1) spit out isn&#x27;t always perfectly tight, Codex defaults to <strong>lenient</strong> mode (<code>PARSE_IN_STRICT_MODE = false</code>), tolerating whitespace before and after markers and so on. The teaching version only implements an approximation of the &quot;lenient&quot; one.</p>
+</details>
+<details>
+<summary>2. Streaming parsing (parse as it generates)</summary>
+<p><code>streaming_parser.rs</code> can <strong>incrementally parse</strong> while the patch is still being generated by the model, pairing with a streaming UI to display the diff in real time. The teaching version waits for the whole patch to arrive and parses it all at once.</p>
+</details>
+<details>
+<summary>3. Fuzzy context matching seek_sequence.rs</summary>
+<p>This chapter has upgraded <code>_find_block</code> to the same <strong>three-tier fallback matching</strong> as <code>seek_sequence.rs</code> (exact → ignore trailing → ignore leading-and-trailing whitespace, see the &quot;Production-grade&quot; section). On top of this, the real Codex also does <code>eof</code> anchoring (preferring to match from the file&#x27;s tail) and a byte-level lenient normalization closer to <code>git apply</code>. The core idea is the same: <strong>loosen tier by tier, accommodating an LLM that makes small mistakes.</strong></p>
+</details>
+<details>
+<summary>4. Sandbox-aware file writes + edge cases</summary>
+<p><code>lib.rs</code> writes files through <code>ExecutorFileSystem</code>, constrained by the sandbox (s05) and approval (s04); it also handles <code>*** Move to:</code> renames, binary-file protection, symlinks, <code>*** End of File</code>, and other edge cases the teaching version skips.</p>
+</details>
+<h2 id="run">Run</h2>
+<pre><code class="language-bash">python s03_apply_patch/code.py --demo   # 不需要模型：演示 Add + Update
+python s03_apply_patch/code.py          # 交互模式（mock 会发一个 apply_patch 调用）</code></pre>
+<p><code>--demo</code> will create a file under <code>_demo_workspace/</code> and then edit it, printing the content before and after; when it finishes it <strong>automatically cleans up</strong> that directory (consistent with the other chapters).</p>
+<h2 id="recap">Recap</h2>
+<ul><li>Codex expresses all file changes with a single structured patch envelope, rather than per-spot string replacement.</li><li>Context anchoring makes the patch robust to model errors.</li><li>This is a textbook example of &quot;tool design follows model training.&quot;</li><li><strong>Production-grade</strong>: fuzzy matching (seek_sequence three-tier fallback) tolerates wrongly-copied whitespace, two-phase commit guarantees atomicity (no half-finished mess on failure), and a locating failure feeds the error back to the model for self-correction (see the &quot;Production-grade&quot; section).</li><li>Next stop <a href="../s04_approval/README.en.html">s04</a>: patch or command, before it&#x27;s written to disk should you first ask the user &quot;approve?&quot; — that&#x27;s the approval policy.</li></ul>
+<h2 id="think-it-over">Think it over</h2>
+<div class="think">
+<ol><li>The model miscounts the indentation of an <code>@@</code> context line by one space, and exact matching fails — the real Codex falls back on fuzzy matching. How fuzzy do you think is &quot;safe&quot;? What risk does over-fuzziness bring?</li><li>apply_patch packs multi-file changes into one call. But if the patch&#x27;s third hunk fails to apply after the first two have already been written to disk — should you roll back? To achieve atomicity, how would you design it?</li><li>Why would OpenAI rather train the model to output this <strong>custom</strong> patch format than directly use a standard unified diff (<code>git diff</code>)? What&#x27;s wrong with the standard format?</li><li>If you had Claude (trained to be good at precise string replacement) use apply_patch, or had Codex use <code>Edit(old→new)</code>, what would happen? What does this say about the relationship between a tool and a model?</li></ol>
+</div>
+</content>
+</invoke>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

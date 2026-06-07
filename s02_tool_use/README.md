@@ -1,5 +1,7 @@
 # s02: Tool Use — 加一个工具，循环一行都不用改
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"加工具不是改循环，而是注册一个 handler + 一份 schema。"*
 
 [learn-codex 总览](../README.md) · [回合循环](../s01_agent_loop/) → **工具与分发** → [apply_patch](../s03_apply_patch/)

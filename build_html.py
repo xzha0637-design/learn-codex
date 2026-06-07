@@ -267,10 +267,10 @@ footer{max-width:860px;margin:0 auto;padding:0 24px 60px;color:var(--muted);font
 """
 
 
-def page(title: str, body: str, depth: int) -> str:
+def page(title: str, body: str, depth: int, is_en: bool = False) -> str:
     prefix = "../" * depth
     css = f"{prefix}assets/codex.css"
-    home = f"{prefix}index.html"
+    home = f"{prefix}" + ("README.en.html" if is_en else "index.html")
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -307,18 +307,19 @@ def build() -> None:
     (ROOT / "assets" / "codex.css").write_text(CSS, encoding="utf-8")
 
     targets: list[tuple[Path, int]] = []
-    root_readme = ROOT / "README.md"
-    if root_readme.exists():
-        targets.append((root_readme, 0))
-    for chapter_readme in sorted(ROOT.glob("s*/README.md")):
+    for root_readme in (ROOT / "README.md", ROOT / "README.en.md"):   # 中 + 英 落地页
+        if root_readme.exists():
+            targets.append((root_readme, 0))
+    for chapter_readme in sorted(ROOT.glob("s*/README.md")) + sorted(ROOT.glob("s*/README.en.md")):
         targets.append((chapter_readme, 1))
-    for doc in sorted(ROOT.glob("docs/*.md")):          # 深入长文
+    for doc in sorted(ROOT.glob("docs/*.md")):          # 深入长文（glob 同时含 *.en.md）
         targets.append((doc, 1))
 
     for src, depth in targets:
         md = src.read_text(encoding="utf-8")
-        out_html = page(first_heading(md), md_to_html(md), depth)
-        # README.md → 同目录 index.html；docs 下的文章 → 同名 .html
+        is_en = src.name.endswith(".en.md")
+        out_html = page(first_heading(md), md_to_html(md), depth, is_en)
+        # README.md → 同目录 index.html；其余（README.en.md / docs 文章）→ 同名 .html
         out_path = src.parent / "index.html" if src.name == "README.md" else src.with_suffix(".html")
         out_path.write_text(out_html, encoding="utf-8")
         print(f"  {src.relative_to(ROOT)} -> {out_path.relative_to(ROOT)}")

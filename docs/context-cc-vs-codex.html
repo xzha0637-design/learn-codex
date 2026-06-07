@@ -10,6 +10,7 @@
 <div class="topbar"><a href="../index.html">📘 learn-codex</a></div>
 <main class="md">
 <h1 id="超长篇claude-code-与-codex-的上下文处理全解">超长篇：Claude Code 与 Codex 的「上下文处理」全解</h1>
+<blockquote>🌐 <a href="context-cc-vs-codex.en.html">English</a> · <strong>中文</strong></blockquote>
 <blockquote>这是一篇深入长文，面向<strong>只有些许基础</strong>的读者。我们从&quot;上下文窗口是什么&quot;讲起，一路拆到两套系统在 注入、压缩、截断、持久化、记忆上的每一处工程取舍，并解释<strong>为什么</strong>它们走了不同的路。 事实依据：Codex 来自本仓库的真源码 <code>../../codex/codex-rs</code>；Claude Code（下称 CC）来自 <a href="../../learn-claude-code/index.html">learn-claude-code</a> 对其源码（<code>compact.ts</code> / <code>autoCompact.ts</code> / <code>microCompact.ts</code> / <code>query.ts</code>）的剖析。 ⚠️ <strong>关于论据强度</strong>：Codex 侧每个数字/常量都能在 <code>codex-rs</code> 里查到行号；CC 侧的精确数字（如「保头几条」「N×K token 预算」「消息类型种数」「轮询 1s/500ms」）转述自 learn-claude-code 对<strong>闭源</strong> CC 的剖析，<strong>无法在本仓库独立核验</strong>——请按二手材料对待，确定性低于 Codex 侧。</blockquote>
 <p><a href="../index.html">← 返回 learn-codex 总览</a></p>
 <hr>

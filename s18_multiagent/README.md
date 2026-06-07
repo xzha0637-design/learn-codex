@@ -1,5 +1,7 @@
 # s18: Multi-Agent — 当一个 agent 不够用：把「通信」做进协议里
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"组队的难点不是分身，是说话。把通信做进协议，它就成了可审计、可加密、可跨机的历史。"*
 
 [learn-codex 总览](../README.md) · [s17 综合：迷你 Codex](../s17_comprehensive/) → **s18 多智能体（进阶专题）** · [回到总览 ↺](../README.md)

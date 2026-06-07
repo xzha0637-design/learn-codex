@@ -1,5 +1,7 @@
 # s13: Hooks — 在回合的关键时刻挂钩子
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"扩展点让用户改行为，而不必 fork 掉 core。"*
 
 [learn-codex 总览](../README.md) · [更多工具：plan / web_search / view_image](../s12_tools_extra/) → **本章** → [Guardian](../s14_guardian/)

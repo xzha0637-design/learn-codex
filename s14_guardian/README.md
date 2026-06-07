@@ -1,5 +1,7 @@
 # s14: Guardian — 自动风险评估
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"没人盯着的时候，谁来把关？派一个 AI 评审员先判一遍。"*
 
 [learn-codex 总览](../README.md) · [Hooks](../s13_hooks/) → **本章** → [MCP：客户端 + 服务端](../s15_mcp/)

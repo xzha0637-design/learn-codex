@@ -1,5 +1,7 @@
 # s07: Context Compaction — 对话太长就把旧回合压成一句摘要
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"上下文窗口是有限的；与其撞墙，不如把走过的路压成一张地图。"*
 
 [learn-codex 总览](../README.md) · [s06 AGENTS.md](../s06_agents_md/) → **s07** → [s08 Rollout 续接](../s08_rollout/)

@@ -1,5 +1,7 @@
 # s06: AGENTS.md — 从 cwd 一路向上，把项目规则分层注入
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"项目的规矩写在文件里，沿着目录树一层层叠加——根定基调，子包微调。"*
 
 [learn-codex 总览](../README.md) · 上一章：[s05 sandbox](../s05_sandbox/) → **s06** → 下一章：[s07 context compaction](../s07_context_compaction/)

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s01: Agent Loop — One Loop Is All You Need</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../README.en.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s01-agent-loop-one-loop-is-all-you-need">s01: Agent Loop — One Loop Is All You Need</h1>
+<blockquote>🌐 <strong>English</strong> · <a href="index.html">中文版</a></blockquote>
+<blockquote><em>&quot;The agent loop is the common foundation of every agent. Agency comes from the model, not from the loop.&quot;</em></blockquote>
+<p><a href="../README.en.html">learn-codex overview</a> · <strong>Agent loop</strong> → <a href="../s02_tool_use/README.en.html">Tools and dispatch</a></p>
+<hr>
+<h2 id="get-the-idea-straight-first-why-one-loop-already-is-an-agent">Get the idea straight first: why &quot;one loop&quot; already is an agent</h2>
+<p>You&#x27;ve probably heard that &quot;agents are complicated.&quot; In reality, the core is unbelievably simple — it&#x27;s just one loop. The hard part isn&#x27;t the loop itself; it&#x27;s grasping the three ideas behind it. Get these three straight and every later chapter will feel easy, because you&#x27;ll have already caught hold of the trunk.</p>
+<p><strong>Idea one: the model is smart, but it &quot;can&#x27;t move.&quot;</strong> A large model can understand what you say and can figure out that it &quot;should run <code>ls</code> to see what&#x27;s in the directory&quot; — but the model itself <strong>only emits text</strong>. It has no hands; it can&#x27;t touch your files, and it can&#x27;t run commands. It&#x27;s like a brilliant advisor who can only pass notes: the note says &quot;go look in folder A,&quot; but the advisor can&#x27;t step out of the room.</p>
+<p><strong>Idea two: so where does the &quot;ability to act&quot; come from? From a small piece of code that connects &quot;writing a note&quot; to &quot;actually doing it.&quot;</strong> You only have to do one thing: <strong>read the advisor&#x27;s note → actually execute it → hand the result back so it can see it → it writes the next note</strong>, over and over. This &quot;pass-the-note / execute / hand-back&quot; cycle is the <strong>agent loop</strong>. Every time the model writes a &quot;do something&quot; note, we execute it on its behalf and feed the result back. That&#x27;s all there is to it — no magic.</p>
+<p><strong>Idea three (the most important): the intelligence belongs to the model; the loop is just a faithful gofer.</strong> The loop itself &quot;understands&quot; nothing. It makes no judgments; it&#x27;s only responsible for &quot;relaying messages and executing.&quot; It&#x27;s the <strong>model</strong> that decides what to do next. So you&#x27;ll witness a striking fact: from start to finish in this course, this loop barely needs <strong>a single line changed</strong> — what changes is only the things we add around it (how to edit files, how to keep it from causing trouble, how to help it remember things…).</p>
+<p>These &quot;things around it&quot; together form a <strong>vehicle</strong>: the model is the driver, and the vehicle carries it anywhere to get work done. <strong>This course teaches you to build that vehicle one block at a time.</strong> And the first block is this loop.</p>
+<h2 id="problem">Problem</h2>
+<p>You ask the model: &quot;See what&#x27;s in this directory, then run the build.&quot;</p>
+<p>The model can emit a command, but once it&#x27;s done emitting, it stops. It won&#x27;t execute on its own, nor can it see the result and keep reasoning. You have to manually copy its command into the terminal, run it, and paste the output back — on every round trip, you&#x27;re playing that middle layer.</p>
+<p>Automating that middle layer is the agent loop.</p>
+<h2 id="solution">Solution</h2>
+<p>One <code>while True</code>: if the model wants to use a tool, execute it and feed the result back; if the model doesn&#x27;t use a tool, that means it has finished talking, so exit.</p>
+<pre><code>   user query
+       │
+       ▼
+   ┌───────────────────────────────┐
+   │  model.respond(messages,tools) │◀────────────┐
+   └───────────────┬───────────────┘             │
+                   │                              │
+            有 tool_call ?                         │
+            /          \                          │
+          是            否 → 打印文本，结束          │
+          │                                       │
+   执行工具(shell) → function_call_output 回灌 ─────┘</code></pre>
+<h2 id="how-it-works">How it works</h2>
+<p>Look at <a href="code.py">code.py</a>, three steps:</p>
+<p><strong>Step 1</strong> — Make the user&#x27;s question the first message. Codex uses the input-item shape of OpenAI&#x27;s Responses API (a flat list of items):</p>
+<pre><code class="language-python">messages = [user_item(query)]   # {&quot;type&quot;:&quot;message&quot;,&quot;role&quot;:&quot;user&quot;,&quot;content&quot;: query}</code></pre>
+<p><strong>Step 2</strong> — Send it to the model along with the tool definitions, and get back a normalized result (text + tool calls):</p>
+<pre><code class="language-python">resp = model.respond(messages, tools=TOOLS, system=SYSTEM)
+messages += resp.output_items   # 把模型本回合产出回灌进对话</code></pre>
+<p><strong>Step 3</strong> — If there are no tool calls, finish; if there are, execute them, append the results back as standalone <code>function_call_output</code> items, and keep looping:</p>
+<pre><code class="language-python">if not resp.tool_calls:
+    return
+for tc in resp.tool_calls:
+    output = HANDLERS[tc.name](**tc.arguments)
+    messages.append(tool_output_item(tc.call_id, output))</code></pre>
+<p>There&#x27;s only one tool: <code>shell</code> (run a command). In the real Codex, this tool is the shell/exec tool in <code>codex-rs/core</code> — the agent&#x27;s workhorse is &quot;running commands.&quot;</p>
+<p><strong>Walk through it</strong> — Replace the abstract &quot;passing notes&quot; with real data. This is exactly the round that <code>python s01_agent_loop/code.py --demo</code> runs. You say a single sentence, then watch how the <code>messages</code> list grows one item at a time:</p>
+<ol><li>Your question first becomes the <strong>first item</strong> in the list. It&#x27;s not a special object; it&#x27;s just an ordinary dictionary — the <code>type</code> field marks who said it:</li></ol>
+<pre><code class="language-json">   {&quot;type&quot;: &quot;message&quot;, &quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;执行 `echo hello from codex` 并告诉我结果&quot;}</code></pre>
+<ol><li>Send this list (along with the tool roster) to the model. The model understands that &quot;it wants me to run a command,&quot; so instead of replying with text, it replies with a <strong>&quot;do something&quot; note</strong> — a <code>function_call</code> item. Note that <code>arguments</code> is a JSON <strong>string</strong> (what the model spits out is text), and <code>call_id</code> is the receipt number for this call:</li></ol>
+<pre><code class="language-json">   {&quot;type&quot;: &quot;function_call&quot;, &quot;call_id&quot;: &quot;mock_call_1&quot;, &quot;name&quot;: &quot;shell&quot;,
+    &quot;arguments&quot;: &quot;{\&quot;command\&quot;: \&quot;echo hello from codex\&quot;}&quot;}</code></pre>
+<p>   The loop sees that <code>resp.tool_calls</code> is non-empty — that&#x27;s the &quot;continue&quot; signal.</p>
+<ol><li>The loop <strong>executes on the model&#x27;s behalf</strong>: it looks up <code>run_shell</code> by the name <code>shell</code>, actually runs <code>echo hello from codex</code>, and gets the output <code>hello from codex</code>. Then it wraps the result as a third item and appends it back to the list. The key is using the <strong>same <code>call_id</code></strong> to match the result to that earlier note:</li></ol>
+<pre><code class="language-json">   {&quot;type&quot;: &quot;function_call_output&quot;, &quot;call_id&quot;: &quot;mock_call_1&quot;, &quot;output&quot;: &quot;hello from codex&quot;}</code></pre>
+<ol><li>Ask the model again with this longer history. This time it sees the command has already run and the result is right in front of it, with nothing left to do — so it replies with plain text and no <code>function_call</code>. <code>resp.tool_calls</code> is empty, and the loop <strong>exits</strong> right there.</li></ol>
+<p>See it? Across the whole round, the loop made <strong>not a single judgment</strong> itself — &quot;should I run a command&quot; and &quot;is it done&quot; were both decided by the model through &quot;whether or not it sends a <code>function_call</code>.&quot; The loop is just a faithful gofer: look up the table, execute, and paste the result back by <code>call_id</code>. This is the living template for idea three.</p>
+<h2 id="production-grade-the-loop-cant-spin-forever-cap-it-make-it-interruptible">Production-grade: the loop can&#x27;t spin forever — cap it + make it interruptible</h2>
+<p>The teaching version&#x27;s <code>while True</code> has two fatal gaps: it <strong>can&#x27;t stop</strong>, and it <strong>can&#x27;t be reined in</strong>. A production-grade agent loop must add two guardrails (this chapter&#x27;s <a href="code.py">code.py</a> already adds them, demonstrated at the end of <code>--demo</code>).</p>
+<h3 id="1-step-cap-prevent-runaway-tool-call-loops">1. Step cap: prevent runaway tool-call loops</h3>
+<p>The model can fall into an infinite loop — repeatedly calling the same failing tool, or bouncing back and forth between two tools. An unbounded <code>while True</code> will <strong>keep burning money and time</strong> until it hits the token limit or you manually kill the process. The production-grade approach is to give the round a <strong>step/budget cap</strong> (<code>for step in range(max_steps)</code>), and force a wrap-up when it hits the ceiling:</p>
+<pre><code> (a) 步数封顶 max_steps=3：卡住的模型被截停 ——
+&gt; shell {&#x27;command&#x27;: &#x27;echo still going&#x27;}   （×3）
+[guard] 触及 max_steps=3 上限，强制收尾（防止失控的工具调用循环）</code></pre>
+<h3 id="2-cooperative-cancellation-when-the-user-says-stop-it-has-to-actually-stop">2. Cooperative cancellation: when the user says stop, it has to actually stop</h3>
+<p>A round that&#x27;s halfway through, when the user presses Ctrl-C / clicks &quot;stop,&quot; must <strong>cleanly stop right there</strong> — not finish running the remaining tool calls before paying attention to you. The real Codex makes &quot;stop&quot; a first-class operation, <code>Op::Interrupt</code> (<a href="../../codex/codex-rs/protocol/src/protocol.rs"><code>protocol.rs:450</code></a>); the round checks it between every step and, on a hit, emits <code>Interrupted</code>. This chapter renders it for teaching with a <code>cancelled()</code> callback — at each step it asks &quot;should I stop now?&quot;:</p>
+<pre><code> (b) 协作式取消：用户在第 3 步中断 ——
+&gt; shell {&#x27;command&#x27;: &#x27;echo still going&#x27;}   （×2）
+[interrupted] 用户中断，干净退出本回合</code></pre>
+<blockquote>Why &quot;cooperative&quot; rather than &quot;force-kill&quot;: you can&#x27;t hard-cut a tool that&#x27;s running halfway — that would leave a half-written file or a half-committed transaction. The right approach is to check the cancellation signal at a <strong>safe checkpoint</strong> (between steps), letting the step currently running <strong>wrap up first</strong> before exiting. This is also why <code>Op::Interrupt</code> sends a signal rather than a <code>kill -9</code>.</blockquote>
+<h2 id="-how-it-differs-from-claude-code">🆚 How it differs from Claude Code</h2>
+<p>This chapter is nearly identical on both sides — <strong>and that&#x27;s precisely the point</strong>: the agent loop is the shared foundation, agency lives in the model, not in the loop. But three early signs already reveal where they diverge:</p>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th><th>Why</th></tr></thead><tbody><tr><td>Stop signal</td><td><code>stop_reason == &quot;tool_use&quot;</code> (Anthropic Messages API)</td><td>Consumes the Responses API event stream; architecturally goes a step further by splitting &quot;submissions&quot; and &quot;events&quot; into two queues</td><td>The two have different wire protocols (see <a href="../s09_responses_api/README.en.html">s09</a>); Codex&#x27;s queueing is for multiple frontends + streaming approvals (<a href="../s11_frontends/README.en.html">s11</a>)</td></tr><tr><td>Dangerous commands</td><td>s01&#x27;s <code>run_bash</code> has a hardcoded blacklist (<code>rm -rf /</code>, <code>sudo</code>…)</td><td><strong>No blacklist</strong></td><td>Codex doesn&#x27;t trust blacklists (command variants are infinite); its answer is approvals (<a href="../s04_approval/README.en.html">s04</a>) + a kernel-level sandbox (<a href="../s05_sandbox/README.en.html">s05</a>)</td></tr><tr><td>The model&#x27;s &quot;thinking&quot;</td><td><code>thinking</code> blocks (with a <code>signature</code>), inside the assistant message&#x27;s content; the tool loop must <strong>carry them back verbatim</strong></td><td><code>reasoning</code> items (with optional <code>encrypted_content</code>), a <strong>standalone item</strong> in the flat item list; carried across rounds via <code>previous_response_id</code></td><td>Each follows the basic shape of its protocol (<strong>blocks</strong> vs <strong>items</strong>); the protections differ too — one <strong>signs</strong> to prevent tampering, the other <strong>encrypts</strong> to prevent leakage → see &quot;Deep dive four&quot; below</td></tr></tbody></table>
+<blockquote>In one line: <strong>Claude Code &quot;blocks&quot; at the application layer; Codex &quot;closes the door&quot; at the kernel layer.</strong> This through-line runs through every later chapter.</blockquote>
+<h2 id="deep-dive-teaching-version-vs-the-real-codex-source">Deep dive: teaching version vs the real Codex source</h2>
+<p>The teaching version&#x27;s <code>run_turn</code> is a synchronous <code>while</code> of about ten lines. The real Codex&#x27;s turn engine lives in <a href="../../codex/codex-rs/core/src/session/turn.rs"><code>core/src/session/turn.rs</code></a>; it&#x27;s asynchronous, wrapped by the SQ/EQ protocol, and has to handle streaming and multiple frontends. Below we unpack a few differences — <em>the core loop is the same one; everything extra is protection and engineering</em>.</p>
+<details>
+<summary>1. Synchronous while vs asynchronous Session</summary>
+<p>The teaching version directly calls <code>model.respond</code> in a <code>while True</code>. The real Codex&#x27;s round runs inside the tokio async runtime: the <code>Session</code> (<code>core/src/session/</code>) takes <code>Op::UserInput</code> from the <strong>submission queue</strong>, and <code>turn.rs</code> orchestrates the whole round — injecting context (AGENTS.md, skills), streaming the call via <code>ModelClient::stream_responses</code>, dispatching tools through <code>ToolRouter::dispatch_any</code>, then sending <code>EventMsg</code>s back to the frontend. &quot;Continue or stop&quot; isn&#x27;t decided by a single <code>return</code>, but driven by the <strong>event stream</strong>.</p>
+</details>
+<details>
+<summary>2. stop_reason isn't the only signal</summary>
+<p>The teaching version decides whether to continue based on whether <code>resp.tool_calls</code> is empty. What the real Codex consumes is the <strong>streaming items</strong> of the Responses API: a <code>function_call</code> item may start being processed as it arrives; the round&#x27;s progress relies on incrementally parsing the output items, rather than looking solely at a single <code>stop_reason</code>. (This parallels how CC in learn-claude-code uses <code>needsFollowUp</code> rather than <code>stop_reason</code>.)</p>
+</details>
+<details>
+<summary>3. A lot more happens in a round than just "calling the model"</summary>
+<table><thead><tr><th>What a real round also does</th><th>Teaching version s01</th><th>Where it&#x27;s added</th></tr></thead><tbody><tr><td>Inject AGENTS.md project memory</td><td>omitted</td><td>s06</td></tr><tr><td>Command approval</td><td>omitted</td><td>s04</td></tr><tr><td>Kernel sandbox</td><td>omitted</td><td>s05</td></tr><tr><td>Record the rollout (resumable)</td><td>omitted</td><td>s08</td></tr><tr><td>Context compaction</td><td>omitted</td><td>s07</td></tr><tr><td>Broadcast events to multiple frontends</td><td>omitted</td><td>s11</td></tr></tbody></table>
+<p>s01 strips all of this away and keeps only the barest loop — they grow back chapter by chapter later.</p>
+</details>
+<details>
+<summary>4. Where the model's "thinking" went: reasoning items (Codex) vs thinking blocks (CC)</summary>
+<p>This chapter&#x27;s <code>model.respond</code> takes only the <strong>text</strong> and <strong>tool calls</strong> the model returns — but a reasoning model also spits out its &quot;thinking process.&quot; Where this goes, and how it&#x27;s carried over the hurdle of &quot;tool calls&quot; into the next round, is handled completely differently by the two, and is yet another place where the wire-protocol difference lands.</p>
+<p><strong>Codex (OpenAI Responses API)</strong>: thinking is a kind of <strong>standalone item</strong> — <code>ResponseItem::Reasoning { id, summary, content, encrypted_content }</code> (<a href="../../codex/codex-rs/protocol/src/models.rs"><code>protocol/src/models.rs:772</code></a>). It&#x27;s <strong>on a par with</strong> <code>message</code> / <code>function_call</code>, sitting right there in that flat item list. In the request, Codex sets <code>include = [&quot;reasoning.encrypted_content&quot;]</code> (<a href="../../codex/codex-rs/core/src/client.rs"><code>core/src/client.rs:768</code></a>) so the server returns the reasoning <strong>encrypted</strong>, then relies on the cached Responses connection + <code>previous_response_id</code> (the comment at the top of <code>client.rs</code>) to <strong>carry it across rounds</strong> — the model can keep thinking along its previous train of thought through a string of tool calls, while you never see the raw CoT. (For simplicity, the teaching version&#x27;s <code>codexlib.py</code> discards the reasoning item; the real Codex keeps it and sends it back.)</p>
+<p><strong>Claude Code (Anthropic Messages API)</strong>: thinking is a <strong><code>thinking</code> block inside the assistant message&#x27;s content array</strong> (with a <code>signature</code>; there&#x27;s also <code>redacted_thinking</code>), alongside the <code>text</code> / <code>tool_use</code> blocks. In the tool loop, you must <strong>carry these signed thinking blocks back verbatim</strong> for the model to keep thinking; Anthropic <strong>verifies the signature</strong> to prevent tampering. <em>(CC-side details are paraphrased from Anthropic docs / learn-claude-code; being closed-source, they can&#x27;t be independently verified in this repo — lower certainty than the Codex side.)</em></p>
+<p><strong>Why are they different?</strong></p>
+<ol><li><strong>Follow the basic shape of the protocol</strong>: Anthropic is &quot;content blocks inside a message,&quot; so thinking is naturally a <strong>block</strong>; Responses is &quot;a flat item list,&quot; so thinking is naturally a <strong>standalone item</strong>. Same root as the first row of the 🆚 table above — shape decides everything.</li><li><strong>Different protections</strong>: Anthropic <strong>signs</strong> the thinking (to prevent tampering on the way back), Codex <strong>encrypts</strong> it (to prevent leaking the raw CoT). Both protect reasoning — one takes the integrity route, the other the confidentiality route.</li><li><strong>Stateless replay vs stateful reference</strong>: the Messages API is stateless, so each round <strong>resends</strong> the signed thinking block; the Responses API can use <code>previous_response_id</code> + server-side <code>store</code> to <strong>reference</strong> the previous segment, without resending every time.</li></ol>
+<p>In one line: <strong>both have to carry the &quot;half-formed train of thought&quot; safely over the hurdle of a tool call — Anthropic relies on &quot;sign + replay the content block,&quot; Codex relies on &quot;encrypt + reference the item.&quot;</strong> For the full picture of the Responses API, see <a href="../s09_responses_api/README.en.html">s09</a>.</p>
+</details>
+<h2 id="run">Run</h2>
+<pre><code class="language-bash">python s01_agent_loop/code.py --demo   # 跑一轮就退出（mock，无需 key）
+python s01_agent_loop/code.py          # 交互模式</code></pre>
+<p>The default is <code>backend=mock</code>, runnable offline. To connect a real model, set <code>OPENAI_API_KEY</code> in the root <code>.env</code> (see <a href="../.env.example">.env.example</a>).</p>
+<h2 id="recap">Recap</h2>
+<ul><li>One loop + one tool = one agent.</li><li>Codex represents the conversation as a Responses API input-item list (<code>message</code> / <code>function_call</code> / <code>function_call_output</code>), which differs from Claude&#x27;s <code>tool_use</code>/<code>tool_result</code> blocks; the model&#x27;s reasoning then appears as a standalone <code>reasoning</code> item (see Deep dive four).</li><li><strong>Production-grade</strong>: replace <code>while True</code> with a loop bounded by <code>max_steps</code> (against runaways), and check the cooperative-cancellation signal at each step (the real Codex&#x27;s <code>Op::Interrupt</code>, so &quot;stop&quot; really stops) — the loop&#x27;s shape doesn&#x27;t change, but it can no longer spin forever and can be reined in (see the &quot;Production-grade&quot; section).</li><li>Next stop, <a href="../s02_tool_use/README.en.html">s02</a>: add a few more tools, and you&#x27;ll see with your own eyes that <strong>the loop doesn&#x27;t need a single line changed</strong>.</li></ul>
+<h2 id="think-it-over">Think it over</h2>
+<div class="think">
+<ol><li>If the model starts streaming out a <code>function_call</code> before it has &quot;thought things through,&quot; can your loop still just look at &quot;is there a tool_call&quot;? How would you change it?</li><li>The same <code>run_turn</code> has to feed both the TUI in a terminal and <code>codex exec</code> in CI. How would you peel apart &quot;what is produced&quot; from &quot;how it&#x27;s displayed&quot;? (s11 gives one answer, but can you come up with your own first?)</li><li>The teaching version has no dangerous-command interception at all. Why is the &quot;blacklist&quot; a dead end? Codex replaces it with approvals + a sandbox — what price does that pay?</li><li>Every round, the loop resends the entire history to the model. What happens to this when the conversation gets long? At which round would you start to worry? (Take this question with you to s07.)</li></ol>
+</div>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

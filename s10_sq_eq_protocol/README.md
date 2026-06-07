@@ -1,5 +1,7 @@
 # s10: SQ/EQ Protocol — 提交队列与事件队列
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"事件向外流，操作向内流；core 与前端各管各的。"*
 
 [learn-codex 总览](../README.md) · [Responses API](../s09_responses_api/) → **本章** → [前端：TUI + exec](../s11_frontends/)

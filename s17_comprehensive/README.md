@@ -1,5 +1,7 @@
 # s17: Comprehensive — 拼装一个迷你 Codex
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"造好载具，agent 会完成剩下的。"*
 
 [learn-codex 总览](../README.md) · [s16 config](../s16_config/) → **s17 综合（单 agent 篇 · 终点）** → [s18 多智能体（进阶）](../s18_multiagent/)

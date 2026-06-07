@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learn Codex — Taking Apart OpenAI Codex&#x27;s Agent Harness From 0 to 1</title>
+<link rel="stylesheet" href="assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="README.en.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="learn-codex-taking-apart-openai-codexs-agent-harness-from-0-to-1">Learn Codex — Taking Apart OpenAI Codex&#x27;s Agent Harness From 0 to 1</h1>
+<blockquote>🌐 <strong>English</strong> · <a href="index.html">中文版</a></blockquote>
+<blockquote>Using the &quot;decomposition mode&quot; of <a href="../learn-claude-code/index.html">learn-claude-code</a> to take apart <strong>OpenAI Codex</strong>: each chapter is one &quot;problem → solution → how it works → runnable code,&quot; growing from a single loop into a complete harness. Every implementation is checked against the local real source (<code>../codex/codex-rs</code>), and <strong>compared chapter by chapter with Claude Code: where it differs, and why</strong>.</blockquote>
+<pre><code>                    THE AGENT PATTERN（两家共通的底座）
+                    ===================================
+
+   user ──▶ messages[] ──▶  MODEL  ──▶ response
+                              │
+                       有 tool_call ?
+                       /            \
+                     是              否 ──▶ 返回文本
+                     │
+              执行工具 → 结果回灌 ──▶ 回到 messages[]
+
+   循环不变。变的是：工具长什么样、命令怎么被关、对话怎么被表示、
+   会话怎么被存、前端怎么消费事件 —— 这些 harness 选择，正是 Codex 和
+   Claude Code 分道扬镳的地方。</code></pre>
+<hr>
+<h2 id="what-this-is">What this is</h2>
+<p>Both Claude Code and Codex are &quot;<strong>model + harness</strong>&quot;: agency (the capacity to perceive, reason, and act) comes from the model&#x27;s training, while the harness is the infrastructure layer that lets the model get work done in a terminal / file system. learn-claude-code has already taken apart Claude Code&#x27;s harness for you.</p>
+<p><strong>learn-codex takes apart another vehicle: OpenAI Codex.</strong> It shares the same agent-loop foundation with Claude Code, but makes different trade-offs on nearly every harness choice. The through-line of this course is exactly this: <strong>lay out these differences one by one, and explain why.</strong></p>
+<blockquote>Relationship to learn-claude-code: that project reproduces the concepts of Claude Code from scratch in Python; this project likewise reproduces the concepts of <strong>Codex</strong> from scratch in Python, and uses the real source (Rust, <code>../codex/codex-rs</code>) as ground truth, ensuring that what it teaches is how Codex actually does things, rather than a reskin.</blockquote>
+<hr>
+<h2 id="-the-core-comparison-codex-vs-claude-code-and-why">🆚 The core comparison: Codex vs Claude Code (and why)</h2>
+<table><thead><tr><th>Dimension</th><th>Claude Code</th><th>OpenAI Codex</th><th>Why it differs</th></tr></thead><tbody><tr><td><strong>Language / openness</strong></td><td>TypeScript/JS, closed-source</td><td><strong>Rust, open-source</strong> (the copy you have locally)</td><td>Codex treats performance, kernel-level sandboxing, and auditability as first-class citizens → chose Rust + open-source</td></tr><tr><td><strong>Wire protocol</strong></td><td>Anthropic Messages API (<code>tool_use</code> / <code>tool_result</code> content blocks)</td><td><strong>OpenAI Responses API</strong> (<code>function_call</code> / <code>function_call_output</code> items + reasoning)</td><td>Each uses its own model and API; the Responses item stream fits streaming and reasoning better → see <a href="./s09_responses_api/README.en.html">s09</a></td></tr><tr><td><strong>Editing files</strong></td><td><code>Edit</code> (exact string replacement) / <code>Write</code> / <code>MultiEdit</code></td><td><strong><code>apply_patch</code></strong> (<code>*** Begin Patch</code> patch envelope — add / change / delete / move in one shot)</td><td>The tool fits the output habits the model was trained on; patches are inherently reviewable / revertible → see <a href="./s03_apply_patch/README.en.html">s03</a></td></tr><tr><td><strong>First line of safety defense</strong></td><td>Approval popup + path validation (<strong>application layer</strong>)</td><td><strong>Kernel-enforced sandbox</strong> (macOS Seatbelt / Linux Landlock+seccomp, <strong>kernel layer</strong>)</td><td>Codex needs to be safe even under low / no human approval (headless, CI, cloud) → see <a href="./s05_sandbox/README.en.html">s05</a></td></tr><tr><td><strong>Overall architecture</strong></td><td>A fairly direct loop</td><td><strong>SQ/EQ queue protocol</strong>: submission queue and event queue decoupled, feeding multiple frontends</td><td>Decoupling lets TUI / <code>codex exec</code> / app-server share the same core → see <a href="./s10_sq_eq_protocol/README.en.html">s10</a></td></tr><tr><td><strong>Frontend</strong></td><td>A single CLI/TUI</td><td>TUI + <code>codex exec</code> headless + app-server (IDE backend), all merely event consumers</td><td>Multiple entry points (terminal, CI, IDE, cloud) → see <a href="./s11_frontends/README.en.html">s11</a></td></tr><tr><td><strong>Project memory</strong></td><td><code>CLAUDE.md</code></td><td><strong><code>AGENTS.md</code></strong> (collected level by level up from cwd and injected)</td><td>Same idea, different convention; Codex pushed AGENTS.md as a cross-tool standard → see <a href="./s06_agents_md/README.en.html">s06</a></td></tr><tr><td><strong>Session persistence</strong></td><td>Conversation history</td><td><strong>Rollout</strong> (SQLite + zstd, can resume / rewind / compact)</td><td>Resumable, revertible, auditable → see <a href="./s08_rollout/README.en.html">s08</a></td></tr><tr><td><strong>Approval granularity</strong></td><td>Popup for dangerous operations</td><td>Approval policies <code>untrusted/on-failure/on-request/never</code> + Guardian automatic risk assessment</td><td>Needs fine-grained switching between different autonomy levels → see <a href="./s04_approval/README.en.html">s04</a>/<a href="./s14_guardian/README.en.html">s14</a></td></tr><tr><td><strong>Extensions</strong></td><td>skills / subagents / hooks / MCP</td><td>MCP (<strong>client + server</strong>) / plugins / hooks / guardian</td><td>Codex both connects to others and can <strong>be used as a tool by others</strong> → see <a href="./s15_mcp/README.en.html">s15</a></td></tr></tbody></table>
+<h3 id="boiling-the-why-down-to-one-sentence">Boiling the &quot;why&quot; down to one sentence</h3>
+<p>The two companies placed different bets:</p>
+<ul><li><strong>Codex bets on &quot;autonomy&quot;</strong>: open-source Rust + kernel sandbox + headless-friendly. The scenario it imagines is &quot;<strong>get work done safely even when no one is watching</strong>&quot; — CI pipelines, cloud Codex, IDE backends. When no one is approving, the only reliable defense is to <strong>push safety down into the kernel</strong>, to express changes as <strong>auditable patches</strong>, and to <strong>store sessions in rollout</strong> so they can be replayed.</li><li><strong>Claude Code bets on &quot;collaboration&quot;</strong>: closed-source + interactive approval UX + bash-centric. The scenario it imagines is &quot;<strong>human and agent side by side</strong>&quot; — dangerous operations pop up to ask you, the human stands as the last gate, and the experience stays as smooth as possible.</li></ul>
+<p>And <strong>model differences directly determine tool differences</strong>: <code>apply_patch</code> vs string replacement is not about who&#x27;s smarter, but about OpenAI and Anthropic training different &quot;editing habits&quot; into their respective models — a good harness makes the tool fit the model, not the other way around.</p>
+<blockquote>This through-line gets fleshed out concretely in every chapter&#x27;s &quot;🆚 How it differs from Claude Code&quot; section.</blockquote>
+<hr>
+<h2 id="course-roadmap-17-chapter-main-line-advanced-topics-difficulty-climbs-monotonically">Course roadmap (17-chapter main line + advanced topics · difficulty climbs monotonically)</h2>
+<p><code>≈</code> = broadly the same as Claude Code　<strong>⭐</strong> = unique to Codex / significantly different (the focus of this course). Each part goes from easy to hard internally, with the overall radius increasing — this progression borrows from learn-claude-code&#x27;s &quot;capability → control → inside-out → integration → synthesis&quot; arrangement philosophy.</p>
+<p><strong>Part 1 · Give it a pair of hands, then put on the reins</strong></p>
+<table><thead><tr><th>Ch</th><th>Topic</th><th>One-line motto</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s01_agent_loop/README.en.html">s01</a></td><td>Agent loop</td><td>One loop is enough</td><td>≈</td></tr><tr><td><a href="./s02_tool_use/README.en.html">s02</a></td><td>Tools and dispatch</td><td>Adding a tool just adds a handler</td><td>≈</td></tr><tr><td><a href="./s03_apply_patch/README.en.html">s03</a></td><td>apply_patch</td><td>Pack changes into a patch envelope</td><td>⭐</td></tr><tr><td><a href="./s04_approval/README.en.html">s04</a></td><td>Approval policy</td><td>Draw the boundary first, then grant freedom</td><td>⭐</td></tr><tr><td><a href="./s05_sandbox/README.en.html">s05</a></td><td>Seatbelt sandbox</td><td>Blocking at the app layer is no match for closing at the kernel layer</td><td>⭐</td></tr></tbody></table>
+<p><strong>Part 2 · The agent&#x27;s brain (context and memory)</strong></p>
+<table><thead><tr><th>Ch</th><th>Topic</th><th>One-line motto</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s06_agents_md/README.en.html">s06</a></td><td>AGENTS.md</td><td>Project rules, picked up level by level</td><td>⭐</td></tr><tr><td><a href="./s07_context_compaction/README.en.html">s07</a></td><td>Context compaction</td><td>Context always fills up — make room</td><td>≈</td></tr><tr><td><a href="./s08_rollout/README.en.html">s08</a></td><td>Rollout resume</td><td>Save the session, pick it back up anytime</td><td>⭐</td></tr></tbody></table>
+<p><strong>Part 3 · Lifting the engine hood (protocol and architecture)</strong></p>
+<table><thead><tr><th>Ch</th><th>Topic</th><th>One-line motto</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s09_responses_api/README.en.html">s09</a></td><td>Responses API</td><td>How the model actually gets called</td><td>⭐</td></tr><tr><td><a href="./s10_sq_eq_protocol/README.en.html">s10</a></td><td>SQ/EQ protocol</td><td>Split submissions and events into two queues</td><td>⭐</td></tr></tbody></table>
+<p><strong>Part 4 · Frontends and extensions</strong></p>
+<table><thead><tr><th>Ch</th><th>Topic</th><th>One-line motto</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s11_frontends/README.en.html">s11</a></td><td>Frontends: TUI + exec</td><td>A frontend is merely a consumer of events</td><td>⭐</td></tr><tr><td><a href="./s12_tools_extra/README.en.html">s12</a></td><td>More tools: plan / web / image</td><td>Add a few more tools</td><td>≈</td></tr><tr><td><a href="./s13_hooks/README.en.html">s13</a></td><td>Hooks</td><td>Hang on the loop, don&#x27;t write into the loop</td><td>≈</td></tr></tbody></table>
+<p><strong>Part 5 · Advanced (guardrails · multi-agent · integration)</strong></p>
+<table><thead><tr><th>Ch</th><th>Topic</th><th>One-line motto</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s14_guardian/README.en.html">s14</a></td><td>Guardian</td><td>When no one&#x27;s around, send an AI to stand guard</td><td>⭐</td></tr><tr><td><a href="./s15_mcp/README.en.html">s15</a></td><td>MCP: client + server</td><td>If you lack a capability, plug one in — and be pluggable by others</td><td>⭐</td></tr></tbody></table>
+<p><strong>Part 6 · Wrap-up</strong></p>
+<table><thead><tr><th>Ch</th><th>Topic</th><th>One-line motto</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s16_config/README.en.html">s16</a></td><td>Config and Profiles</td><td>Switch preset levels with one key</td><td>⭐</td></tr><tr><td><a href="./s17_comprehensive/README.en.html">s17</a></td><td>Synthesis: mini Codex</td><td>Many mechanisms, one loop</td><td>—</td></tr></tbody></table>
+<p><strong>Advanced topic · When one agent isn&#x27;t enough</strong></p>
+<table><thead><tr><th>Ch</th><th>Topic</th><th>One-line motto</th><th>vs CC</th></tr></thead><tbody><tr><td><a href="./s18_multiagent/README.en.html">s18</a></td><td>Multi-agent: agent communication</td><td>Build communication into the protocol, and it becomes history</td><td>⭐</td></tr></tbody></table>
+<blockquote><strong>Current status: the 17-chapter main line + advanced topic s18 are all in place, all runnable offline with <code>--demo</code> (18/18 exit 0); plus two in-depth long reads, see below.</strong></blockquote>
+<hr>
+<h2 id="quick-start">Quick start</h2>
+<pre><code class="language-bash">cd learn-codex
+python3 s01_agent_loop/code.py --demo     # 回合循环
+python3 s03_apply_patch/code.py --demo    # 招牌编辑工具
+python3 s05_sandbox/code.py --demo        # 内核沙箱（macOS 上真实拦截越界写）</code></pre>
+<p><strong>Default <code>backend=mock</code>: no key needed, no network needed</strong>, and you can run through each chapter&#x27;s agent loop and mechanism demo.</p>
+<p>To experience the real Codex wire protocol (OpenAI Responses API):</p>
+<pre><code class="language-bash">pip install -r requirements.txt
+cp .env.example .env        # 填入 OPENAI_API_KEY，会自动切到 openai 后端</code></pre>
+<p>Model calls are uniformly wrapped in <a href="./codexlib.py">codexlib.py</a> (mock / openai dual backends); each chapter&#x27;s <strong>unique mechanism</strong> is inlined in that chapter&#x27;s <code>code.py</code> and can be read through as a single file.</p>
+<hr>
+<h2 id="browse-the-html-version">Browse the HTML version</h2>
+<p>Each chapter&#x27;s README can be turned into a styled web page with one command (zero dependencies, a pure-Python parser, supporting tables / code blocks / <code>&lt;details&gt;</code> folding / reference-style links):</p>
+<pre><code class="language-bash">python3 build_html.py        # 生成根 index.html + 各章 index.html + assets/codex.css</code></pre>
+<p>Open the generated <code>index.html</code> in a browser to read chapter by chapter; each chapter ends with a &quot;Think it over&quot; question. The parser itself (<a href="./build_html.py">build_html.py</a>) is also a small teaching sample on Markdown parsing.</p>
+<hr>
+<h2 id="in-depth-long-reads-very-long-comparisons">In-depth long reads (very long comparisons)</h2>
+<p>Beyond the chapters, <code>docs/</code> contains a few dedicated, in-depth Claude Code vs Codex comparison long reads:</p>
+<ul><li><a href="docs/api-message-vs-responses.en.html">The complete guide to Messages API vs Responses API</a> — the two <strong>wire protocols</strong> laid out cell by cell: request / conversation shape / tool encoding / reasoning carriage / state / streaming / failure, asking &quot;why&quot; at every difference, all grounded in <code>codex-rs</code> source line numbers.</li><li><a href="docs/context-cc-vs-codex.en.html">The complete guide to context handling</a> — injection / compaction / truncation / persistence / memory, compared layer by layer, including server-side compaction and rollout decoupling.</li><li><a href="docs/subagent-multiagent-cc-vs-codex.en.html">The complete guide to subagents and multi-agents</a> — clones and teams: CC&#x27;s file-inbox teammate squad vs Codex&#x27;s network of threads with identity (<strong>runnable skeleton in <a href="s18_multiagent/README.en.html">s18 multi-agent</a></strong>).</li></ul>
+<hr>
+<h2 id="graduation-work-mini-codex-assembling-18-chapters-into-one-runnable-vehicle">Graduation work: mini-codex (assembling 18 chapters into one runnable vehicle)</h2>
+<p>After finishing the 18 chapters, <a href="mini_codex/README.en.html">mini_codex/</a> <strong>assembles</strong> them into a folder-split, modular mini Codex — not yet another single-file demo, but a complete structure where <code>tools/</code> <code>skills/</code> <code>hooks/</code> <code>safety/</code> <code>memory/</code> <code>persistence/</code> <code>session/</code> are each their own independent package.</p>
+<pre><code class="language-bash">python3 -m mini_codex --demo</code></pre>
+<p>A single user request passes through nine gates — <strong>config → AGENTS.md injection → model → hooks → Guardian → approval → sandbox → tools → rollout persistence</strong> — each gate emitting an event that gets printed; the model occupies only one of those steps. Each module carries the &quot;production-grade&quot; layer of its corresponding chapter (schema validation / retry / fail closed / circuit breaker / append-only…). See <a href="mini_codex/README.en.html">mini_codex/README.md</a> for details.</p>
+<hr>
+<h2 id="design-principles-carried-over-from-learn-claude-code">Design principles (carried over from learn-claude-code)</h2>
+<ol><li><strong>One mechanism per chapter</strong>, paired with a motto.</li><li><strong>Code readable as a single file</strong>: use <code>FROM s01（搬运）</code> / <code>NEW in sNN</code> banners to mark &quot;which parts came from the previous chapter, which are new in this one.&quot;</li><li><strong>Runnable offline</strong>: the mock backend lets anyone verify at zero cost.</li><li><strong>Checked against the real source</strong>: each chapter cites the corresponding <code>codex-rs</code> file, teaching how Codex actually does things.</li><li><strong>Compared chapter by chapter with Claude Code</strong>: every chapter has a &quot;🆚 How it differs from Claude Code,&quot; explaining the difference and the reason.</li><li><strong>In-depth cross-check + closing question</strong>: each chapter comes with a <code>&lt;details&gt;</code> &quot;teaching version vs real Codex source&quot; in-depth cross-check, and ends with a &quot;Think it over&quot; open-ended question.</li><li><strong>For beginners: teach ideas, don&#x27;t memorize vocabulary</strong>: each chapter opens with &quot;Get the idea straight first&quot; to talk through the reasoning behind the mechanism — using analogies and chains of reasoning, with terminology brought out naturally in the narrative rather than as a glossary of nouns; &quot;How it works&quot; includes a &quot;Walk through it&quot; concrete example. Difficulty climbs monotonically across the 6 parts.</li></ol>
+<hr>
+<h2 id="acknowledgments">Acknowledgments</h2>
+<ul><li>Form and pedagogy pay homage to <a href="https://github.com/shareAI-lab/learn-claude-code">shareAI-lab/learn-claude-code</a>.</li><li>Factual ground truth comes from the real source of <a href="https://github.com/openai/codex">OpenAI Codex</a> (this repo&#x27;s <code>../codex</code>).</li></ul>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

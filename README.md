@@ -1,5 +1,7 @@
 # Learn Codex —— 从 0 到 1 拆解 OpenAI Codex 的 Agent Harness
 
+> 🌐 [English](README.en.md) · **中文**
+
 > 用 [learn-claude-code](../learn-claude-code/) 的「分解模式」拆解 **OpenAI Codex**：
 > 每章一个『问题 → 方案 → 原理 → 可跑代码』，从一个循环长成一个完整 harness。
 > 所有实现都对照本地真源码（`../codex/codex-rs`），并**逐章对比 Claude Code：哪里不同、为什么**。

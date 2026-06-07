@@ -1,5 +1,7 @@
 # s05: Sandbox — 把每条命令关进内核沙箱
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"Claude Code 在应用层挡，Codex 在内核层关。"*
 
 [learn-codex 总览](../README.md) · 上一章：[s04 approval](../s04_approval/) → **s05** → 下一章：[s06 AGENTS.md](../s06_agents_md/)

@@ -1,5 +1,7 @@
 # s04: Approval Policy — 先问能不能做
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"审批是用户的同意书；沙箱是内核的禁令。两者正交。"*
 
 [learn-codex 总览](../README.md) · 上一章：[s03 apply_patch](../s03_apply_patch/) → **s04** → 下一章：[s05 sandbox](../s05_sandbox/)

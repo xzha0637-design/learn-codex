@@ -1,5 +1,7 @@
 # s08: Rollout — 把整场对话刻进磁盘
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"上下文是给模型看的草稿，rollout 是给世界留的底稿。"*
 
 [learn-codex 总览](../README.md) · [s07 Context Compaction](../s07_context_compaction/) → **s08** → [s09 Responses API](../s09_responses_api/)

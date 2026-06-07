@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s14: Guardian — Automatic Risk Assessment</title>
+<link rel="stylesheet" href="../assets/codex.css">
+</head>
+<body>
+<div class="topbar"><a href="../README.en.html">📘 learn-codex</a></div>
+<main class="md">
+<h1 id="s14-guardian-automatic-risk-assessment">s14: Guardian — Automatic Risk Assessment</h1>
+<blockquote>🌐 <strong>English</strong> · <a href="index.html">中文版</a></blockquote>
+<blockquote><em>&quot;When no one is watching, who keeps the gate? Send an AI reviewer to make the first call.&quot;</em></blockquote>
+<p><a href="../README.en.html">learn-codex overview</a> · <a href="../s13_hooks/README.en.html">Hooks</a> → <strong>this chapter</strong> → <a href="../s15_mcp/README.en.html">MCP: client + server</a></p>
+<hr>
+<h2 id="get-the-idea-straight-first-when-no-one-is-at-the-gate-send-an-ai-to-keep-it">Get the idea straight first: when no one is at the gate, send an AI to keep it</h2>
+<p>The approval layer one level down (<a href="../s04_approval/README.en.html">s04</a>) is elegant: a dangerous command pops up a dialog and lets a human make the call. But it hides an implicit premise — <strong>there has to be a person there, and they have to be actually watching</strong>. The moment Codex runs into a CI pipeline, a cloud task, an IDE backend, or any environment where <strong>no one is staring at the screen</strong> (collectively, headless / unattended), that premise collapses: there is no one to answer the dialog. Every knot in this chapter traces back to that one sentence. Get the following three ideas straight and you&#x27;ll see why the new role called Guardian is non-negotiable.</p>
+<p><strong>Idea one: when &quot;no one is present,&quot; the old approval scheme gets backed into a corner.</strong> When the model wants to run a risky command, the approval policy either &quot;asks the user&quot; or &quot;doesn&#x27;t.&quot; But under unattended operation, neither path works: set it to &quot;ask the user,&quot; and every slightly sensitive command <strong>escalates</strong> (meaning it hands the decision back from the automated flow to a human) to a person who <strong>will never respond</strong> — the turn just hangs there; set it to &quot;don&#x27;t ask,&quot; and you&#x27;ve handed all judgment to the model, which will faithfully run a catastrophic command the moment it slips up or gets talked into it by an injection. <strong>Either hang waiting for a response that never comes, or let everything through</strong> — what&#x27;s missing in the middle is something that can make the call on the user&#x27;s behalf while the user is absent.</p>
+<p><strong>Idea two: the missing &quot;judge&quot; is, by its nature, a job you can delegate — so delegate it to an AI.</strong> Here&#x27;s the crucial leap: &quot;deciding whether this command should be let through&quot; was originally a human job, but at its core it&#x27;s <strong>cognitive work</strong>, and cognitive work is exactly what AI can do. So Codex&#x27;s answer is — before the main agent actually executes a command, <strong>dispatch a dedicated AI reviewer first</strong> (this is <strong>Guardian</strong>) to vet the command on behalf of the absent user. This is not a set of hard-coded <code>if</code>s; it&#x27;s <strong>a separate model call</strong>: feed this reviewing agent &quot;the conversation up to this moment + the action the model plans to take,&quot; and let it read and return a verdict. &quot;Spin up another AI to review the first AI&quot; is the soul of this chapter — <strong>a sense of safety doesn&#x27;t come from blocking every command; it comes from automating the act of &quot;judging&quot; itself, so it can be rolled out at scale to every single command</strong>. (For the sake of being offline-runnable, this chapter <strong>simulates</strong> the reviewer with a set of conservative rules, but the output shape matches the real thing.)</p>
+<p><strong>Idea three (the most important): gatekeeping needs nuance, and it must &quot;fail toward safety.&quot;</strong> Sending an AI to either wave everything through or block everything is too dumb — most commands (<code>ls</code>, <code>echo</code>) aren&#x27;t worth bothering anyone about, and a tiny few (<code>rm -rf ~</code>, <code>curl ... | sh</code>) are almost certainly disasters. So Guardian assigns every action a <strong>risk tier</strong>, four levels from light to heavy: 🟢 <code>low</code>, 🟡 <code>medium</code>, 🟠 <code>high</code>, 🔴 <code>critical</code>, then maps each tier to an action — <code>low → auto_allow</code> (auto-allow, doesn&#x27;t bother you), <code>critical → auto_deny</code> (deny outright, without even asking), and only the uncertain <code>medium / high → escalate</code> (escalate back to <a href="../s04_approval/README.en.html">s04</a> for a human to call). In one line: <strong>both ends are automatic, the middle asks a human.</strong> And when Guardian itself goes wrong — times out, crashes, can&#x27;t make sense of the return — it <strong>defaults to &quot;deny&quot; rather than &quot;allow&quot;</strong>; this principle is called <strong>fail-closed</strong>: like an access-control system that locks itself shut rather than swinging wide open when the power goes out — <strong>when something breaks, fall toward the safe side</strong>.</p>
+<p>Tie the three together: *<em>Guardian = an automatic reviewer, slotted in </em>before<em> &quot;ask the user,&quot; sorting risk into four tiers — auto-allow the low ones, auto-deny the catastrophic ones, escalate only the middle to a human; it is always fail-closed, and the user can always override it.</em>* This is the most direct answer to &quot;when no one is watching, who keeps the gate,&quot; and it&#x27;s the safety-layer endpoint of this course&#x27;s through-line, &quot;betting on low/no human intervention&quot;: even &quot;the person at the gate&quot; has been automated as much as possible.</p>
+<h2 id="problem">Problem</h2>
+<p><a href="../s04_approval/README.en.html">s04</a> gave us the approval policy: dangerous commands escalate to the user for a call. That works great when you&#x27;re sitting there watching the screen.</p>
+<p>But Codex&#x27;s ambition is to run when <strong>no one is watching</strong> — <code>codex exec</code> inside CI, Codex in the cloud, an IDE backend, all running for dozens of turns at a stretch. Here the approval policy hits a wall:</p>
+<ul><li>Set <code>on-request</code>, and every slightly sensitive command escalates to the user — but <strong>there is no user responding</strong>, and the turn just hangs there.</li><li>Set <code>never</code>, and you simply don&#x27;t ask — but that hands all judgment to the model, and the moment the model slips up (or gets lured by an injection), it&#x27;ll run a catastrophic command just the same.</li></ul>
+<p>A dilemma: <strong>either hang waiting for a response that never comes, or let everything through.</strong> What&#x27;s missing in the middle is a layer — something that, while the user is absent, can make the &quot;this can be auto-allowed / this must be blocked&quot; call on the user&#x27;s behalf.</p>
+<h2 id="solution">Solution</h2>
+<p>An automatic risk assessor <code>guardian(action) -&gt; {risk, reason}</code>, wired in as an <strong>automatic approver</strong> slotted in <em>before</em> &quot;ask the user.&quot; Risk is sorted into four tiers, each mapped to one automatic decision:</p>
+<pre><code>   model 要执行 action（命令 / 补丁）
+        │
+        ▼
+   ┌──────────── guardian(action) ────────────┐
+   │   评估风险 → {risk, reason}                 │
+   │        │                                   │
+   │   ┌────┴─────────────────────────────┐    │
+   │   │ 🟢 low      → auto_allow（不打扰） │    │
+   │   │ 🟡 medium   ┐                      │    │
+   │   │ 🟠 high     ┘→ escalate（问用户）   │── 回到 s04 审批门
+   │   │ 🔴 critical → auto_deny（连问都不问）│    │
+   │   └──────────────────────────────────┘    │
+   └────────────────────┬──────────────────────┘
+                         ▼
+        执行 / 不执行（或交给用户拍板）</code></pre>
+<p>Low risk gets auto-allowed (so you&#x27;re not bothered by every <code>ls</code>), catastrophic gets auto-denied (fail-closed, without even asking), and only the middle — medium / high — <strong>escalates</strong> back to <a href="../s04_approval/README.en.html">s04</a>&#x27;s approval gate for a human to decide. This way: when someone&#x27;s there, fewer interruptions; when no one is, no breach.</p>
+<h2 id="how-it-works">How it works</h2>
+<p>Look at <a href="code.py">code.py</a>, two blocks.</p>
+<p><strong>Block 1</strong> — the risk assessor <code>guardian()</code>, returning <code>{risk, reason}</code> in the same shape as the real source:</p>
+<pre><code class="language-python">RISK_LEVELS = (&quot;low&quot;, &quot;medium&quot;, &quot;high&quot;, &quot;critical&quot;)
+
+def guardian(action):
+    if &quot;rm -rf ~&quot; in low or &quot;curl ... | sh&quot;: return {&quot;risk&quot;: &quot;critical&quot;, ...}
+    if low.startswith(&quot;sudo &quot;) or &quot;rm &quot;:     return {&quot;risk&quot;: &quot;high&quot;, ...}
+    if &quot;git commit&quot; / &quot;pip install&quot; / &quot;&gt;&quot;:   return {&quot;risk&quot;: &quot;medium&quot;, ...}
+    return {&quot;risk&quot;: &quot;low&quot;, &quot;reason&quot;: &quot;只读或无明显副作用&quot;}</code></pre>
+<p>The four tier names come straight from the real source <a href="../../codex/codex-rs/protocol/src/approvals.rs"><code>GuardianRiskLevel::{Low, Medium, High, Critical}</code></a> (<code>approvals.rs:85</code>). In reality this judgment isn&#x27;t made by rules but by a <strong>reviewing LLM</strong> (see the deep dive below); this chapter <strong>simulates</strong> that reviewer with a set of conservative rules so the demo runs offline.</p>
+<p><strong>Block 2</strong> — map the risk tier to an automatic decision, then thread it into execution:</p>
+<pre><code class="language-python">def auto_decision(action):
+    risk = guardian(action)[&quot;risk&quot;]
+    if risk == &quot;low&quot;:      return {... &quot;decision&quot;: &quot;auto_allow&quot;}
+    if risk == &quot;critical&quot;: return {... &quot;decision&quot;: &quot;auto_deny&quot;}
+    return {... &quot;decision&quot;: &quot;escalate&quot;}          # medium / high
+
+def guarded_execute(action, ask_user, run_fn):
+    v = auto_decision(action)
+    if v[&quot;decision&quot;] == &quot;auto_allow&quot;: return run_fn(action)
+    if v[&quot;decision&quot;] == &quot;auto_deny&quot;:  return &quot;[guardian 自动拒绝] 未执行&quot;
+    return run_fn(action) if ask_user(action, v[&quot;risk&quot;]) else &quot;[用户拒绝] 未执行&quot;  # escalate</code></pre>
+<p>The <code>escalate</code> branch is precisely the seam with <a href="../s04_approval/README.en.html">s04</a> — what Guardian can&#x27;t decide gets handed back to the approval gate for a human to call.</p>
+<p><code>--demo</code> feeds five actions into guardian: <code>echo</code> (low→auto-allow), <code>git commit</code> (medium→escalate, simulated user approval), <code>rm -rf build</code> (high→escalate, simulated user denial), <code>curl|sh</code> and <code>rm -rf ~</code> (critical→auto-deny). Each one prints the risk tier, the reason, and the automatic decision.</p>
+<p><strong>Walk through it.</strong> We pick <strong>three representative actions</strong> from the demo and watch each one — <strong>what it looks like going into guardian, what guardian rules, and how it&#x27;s finally handled</strong> — three that happen to cover the three outcomes &quot;auto-allow / escalate to human / auto-deny.&quot;</p>
+<ol><li><strong><code>echo SQ/EQ works</code> — low risk, auto-allowed.</strong></li></ol>
+<p>   Into <code>guardian()</code>; the command merely prints, with no side effects, falling to the last catch-all rule, which returns:</p>
+<pre><code class="language-json">   { &quot;risk&quot;: &quot;low&quot;, &quot;reason&quot;: &quot;只读或无明显副作用&quot; }</code></pre>
+<p>   <code>auto_decision</code> maps <code>low</code> to <code>auto_allow</code>. <code>guarded_execute</code> sees <code>auto_allow</code> and <strong>executes directly, without bothering the user at all</strong>. This is why you don&#x27;t get worn out by every <code>ls</code>, every <code>echo</code>.</p>
+<ol><li><strong><code>rm -rf build</code> — high risk, escalate to a human.</strong></li></ol>
+<p>   Into <code>guardian()</code>; it hits the &quot;contains <code>rm</code>&quot; rule and returns:</p>
+<pre><code class="language-json">   { &quot;risk&quot;: &quot;high&quot;, &quot;reason&quot;: &quot;删除文件 / 提权 / 危险操作&quot; }</code></pre>
+<p>   <code>auto_decision</code> maps <code>high</code> (like <code>medium</code>) to <code>escalate</code> — <strong>guardian doesn&#x27;t dare make the call itself</strong>. So <code>guarded_execute</code> reaches the last line and calls <code>ask_user(action, &quot;high&quot;)</code> to kick the ball back to a human (the demo simulates the user answering &quot;deny&quot;). <strong>Why not auto-deny?</strong> Because <code>rm -rf build</code> is reasonable in plenty of normal workflows (cleaning up build artifacts), and blanket-denying it would block legitimate work — this &quot;dangerous but possibly reasonable&quot; kind is exactly what should go to a human. This step is the seam with <a href="../s04_approval/README.en.html">s04</a>&#x27;s approval gate.</p>
+<ol><li><strong><code>rm -rf ~</code> — catastrophic, auto-deny (the spirit of fail-closed).</strong></li></ol>
+<p>   Into <code>guardian()</code>; it hits the &quot;catastrophe&quot; rule and returns:</p>
+<pre><code class="language-json">   { &quot;risk&quot;: &quot;critical&quot;, &quot;reason&quot;: &quot;可能摧毁系统 / 远程执行任意代码&quot; }</code></pre>
+<p>   <code>auto_decision</code> maps <code>critical</code> to <code>auto_deny</code>. <code>guarded_execute</code> <strong>doesn&#x27;t even ask</strong>, returning <code>[guardian 自动拒绝] 未执行</code> directly. <strong>Why not even ask?</strong> Because a command like this has almost no &quot;legitimate use,&quot; and escalating it to the user instead creates a chance for a &quot;fat-fingered yes&quot; or a &quot;social-engineered yes&quot; — better to weld it shut. This is &quot;better to over-kill&quot; made concrete in the demo.</p>
+<p>Tie the three together: <strong>one and the same guardian gives three commands three risk tiers, then maps them to three dispositions — both ends (low/critical) it handles on its own, and only the middle (medium/high) pulls a human in.</strong> This is the whole value of Guardian: when no one is watching, it shields you from the vast majority of pointless interruptions and pointless risks, leaving you only the small handful that genuinely need human judgment.</p>
+<h2 id="production-grade-when-an-ai-keeps-the-gate-youd-better-insure-that-ai">Production-grade: when an AI keeps the gate, you&#x27;d better insure that AI</h2>
+<p>Letting an AI (Guardian) keep the gate for an absent user sounds dangerous right off — the gatekeeper itself can time out, crash, or be fooled. So Guardian&#x27;s production-grade story is entirely in the several insurance layers wrapped around it:</p>
+<ul><li><strong>fail-closed</strong>: Guardian times out / crashes / returns JSON that won&#x27;t parse — <strong>deny across the board</strong>, never &quot;let through on error&quot; (real source <code>core/src/guardian/review.rs:147/251</code>). Falling toward safety when the gatekeeper fails is the same instinct as the sandbox&#x27;s deny-default (<a href="../s05_sandbox/README.en.html">s05</a>) and approval&#x27;s <code>TimedOut→deny</code> (<a href="../s04_approval/README.en.html">s04</a>).</li><li><strong>circuit breaker</strong>: prevents Guardian itself from spiraling into endless review/endless denial. <code>MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN = 3</code> — once consecutive denials in one turn hit the threshold, trip the breaker and stop spinning in place burning money (echoing the &quot;backoff alone isn&#x27;t enough, you also need a circuit breaker&quot; problem from <a href="../s09_responses_api/README.en.html">s09 retries</a>).</li><li><strong>structured contract + timeout</strong>: Guardian must return strict JSON (<code>GuardianAssessment</code>), running inside a forked sub-session with a timeout — anything it can&#x27;t make sense of or won&#x27;t return goes fail-closed.</li><li><strong>an honest limitation</strong>: Guardian and the model it reviews are often <strong>the same generation from the same source</strong> — an injection that can fool the first might just as easily fool it (see this chapter&#x27;s Think it over #1). &quot;AI reviewing AI&quot; adds a check from <strong>a different vantage point</strong>, not an impassable wall.</li></ul>
+<blockquote>In one line: Guardian&#x27;s value isn&#x27;t &quot;the AI is smart enough to keep the gate,&quot; it&#x27;s &quot;<strong>when the gatekeeper fails, the whole system falls toward deny rather than allow</strong>.&quot; That&#x27;s the confidence behind it taking the post when no one is around.</blockquote>
+<h2 id="-how-it-differs-from-claude-code">🆚 How it differs from Claude Code</h2>
+<p>This is <strong>the single most striking difference (⭐)</strong> between Codex and Claude Code: Codex adds a whole layer of &quot;automatic reviewer,&quot; and Claude Code has no counterpart.</p>
+<table><thead><tr><th></th><th>Claude Code</th><th>Codex</th></tr></thead><tbody><tr><td>Who judges risk</td><td><strong>The user</strong> (the dialog is put in front of you, you judge)</td><td><strong>An automatic reviewing agent</strong> (Guardian) judges first</td></tr><tr><td>When no one&#x27;s watching</td><td>Stuck at the dialog / entirely up to the model</td><td>Guardian makes the low→allow, critical→deny calls for the user</td></tr><tr><td>Basis for the judgment</td><td>Human intuition + present attention</td><td>A reviewing LLM reads the transcript + planned action, returns structured <code>{risk, outcome, rationale}</code></td></tr><tr><td>Failure mode</td><td>The user clicked &quot;approve mindlessly&quot;</td><td>Guardian misjudges (but critical is fail-closed + the user can override)</td></tr></tbody></table>
+<p><strong>Why does Codex need this extra layer?</strong> In one line: <strong>to safely scale up autonomy even when no one is watching.</strong></p>
+<p>Claude Code&#x27;s vision is &quot;human and agent side by side&quot; — dangerous operations pop up a dialog asking you, and a human holds the final gate. In interactive settings this is both safe and smooth. But it has an implicit premise: <strong>there is a person there, and they&#x27;re actually watching</strong>. Once you enter headless / CI / cloud, that premise collapses.</p>
+<p>Codex bets on &quot;autonomy&quot; — it has to assume <strong>no one is responding</strong>. So it takes &quot;judging risk,&quot; a job originally done by a human, and <strong>hands it to an AI too</strong>: a dedicated reviewing sub-agent that, before the main agent&#x27;s tool call actually executes, independently reads the context once and judges the risk once. This layer lets Codex neither hang waiting for a human on every command nor surrender judgment entirely to a main model that might slip up — instead it uses &quot;a second AI&quot; to keep the gate for &quot;the first AI.&quot; This is the ultimate expression, at the safety layer, of this course&#x27;s through-line &quot;Codex bets on low human intervention&quot;: even &quot;the person at the gate&quot; has been automated as much as possible.</p>
+<p>Note that Guardian <strong>does not replace</strong> approval and the sandbox; it layers on top of them: when Guardian rules escalate, it still falls back to user approval (<a href="../s04_approval/README.en.html">s04</a>), and the command still ultimately runs inside the kernel-level sandbox (<a href="../s05_sandbox/README.en.html">s05</a>). It merely lifts out the two ends — &quot;can be auto-allowed / must be blocked&quot; — sparing pointless interruptions and pointless risks.</p>
+<h2 id="deep-dive-the-teaching-version-vs-the-real-codex-source">Deep dive: the teaching version vs. the real Codex source</h2>
+<p>This chapter&#x27;s <code>guardian()</code> is a set of <code>if</code>s; real Codex&#x27;s Guardian is a <strong>reviewing-LLM sub-agent that forks the current session, reads the transcript, and returns strict JSON</strong>, plus a suite of fail-closed and anti-abuse mechanisms. Let&#x27;s take it apart below.</p>
+<details>
+<summary>1. The real Guardian is a reviewing LLM, not a rule table</summary>
+<p>The doc-comment at the top of the real source <code>core/src/guardian/mod.rs</code> spells out its workflow plainly:</p>
+<blockquote>Guardian review decides whether an <code>on-request</code> approval should be granted automatically instead of shown to the user. 1. Rebuild a compact transcript (preserving user intent + the most recent relevant assistant/tool context); 2. Have a dedicated guardian review session assess this <strong>exact planned action</strong>, returning strict JSON; 3. Timeout / execution failure / malformed output all <strong>fail closed</strong>; 4. Apply the allow/deny conclusion the guardian gives.</blockquote>
+<p>That is, Guardian is itself <strong>a model call</strong>: it clones the parent session&#x27;s config (inheriting the same network proxy/allowlist), feeds it &quot;the conversation up to this moment + the action it plans to take,&quot; and demands it produce a structured assessment. This chapter simulates this reviewer&#x27;s output with rules, but the shape matches.</p>
+<p>The contract it returns is <code>GuardianAssessment</code> (<code>mod.rs:63</code>):</p>
+<pre><code class="language-rust">pub(crate) struct GuardianAssessment {
+    pub risk_level: GuardianRiskLevel,            // Low / Medium / High / Critical
+    pub user_authorization: GuardianUserAuthorization,  // 转录里用户授权得有多直接
+    pub outcome: GuardianAssessmentOutcome,       // Allow / Deny（最终裁决）
+    pub rationale: String,                        // 人类可读的理由
+}</code></pre>
+<p>This chapter takes only <code>risk_level</code> + <code>rationale</code>; the real source has one more, <code>user_authorization</code> — the reviewer judges &quot;whether the user actually explicitly authorized this kind of action in the conversation,&quot; and the more direct the authorization, the more it dares to allow.</p>
+</details>
+<details>
+<summary>2. It only takes the post on the on-request tier, and it is always fail-closed</summary>
+<p>Guardian doesn&#x27;t intervene unconditionally. <code>review.rs:147</code>&#x27;s <code>routes_approval_to_guardian</code> decides when to route to it:</p>
+<pre><code class="language-rust">pub(crate) fn routes_approval_to_guardian_with_reviewer(turn, approvals_reviewer) -&gt; bool {
+    matches!(turn.approval_policy.value(),
+             AskForApproval::OnRequest | AskForApproval::Granular(_))
+        &amp;&amp; approvals_reviewer == ApprovalsReviewer::AutoReview
+}</code></pre>
+<p>That is: only when the approval policy is <code>on-request</code> (or <code>granular</code>) and <code>AutoReview</code> is enabled does Guardian take the post — it is precisely the &quot;automated escalation handler&quot; for that <code>on-request</code> tier from <a href="../s04_approval/README.en.html">s04</a>.</p>
+<p>And its fail-closed behavior is carved into the function&#x27;s comment (<code>review.rs:251</code>):</p>
+<blockquote>This function always fails closed: timeouts, review-session failures, and parse failures all block execution.</blockquote>
+<p>This chapter expresses the spirit of fail-closed via &quot;critical → auto_deny&quot;; the real source goes further: <strong>the reviewer times out (default 90 seconds, <code>GUARDIAN_REVIEW_TIMEOUT</code>), crashes, or fails to parse the JSON — any one of these anomalies, and it&#x27;s a Deny</strong>. Better to over-kill than to let through.</p>
+</details>
+<details>
+<summary>3. Keeping the reviewer from running wild: the circuit breaker</summary>
+<p>Handing &quot;judgment&quot; to an AI raises a new problem: <strong>what if the reviewer itself goes haywire and denies normal actions one after another?</strong> The main agent could get stuck in a &quot;propose → denied → propose again → denied again&quot; infinite loop.</p>
+<p>The real source solves this with a circuit breaker (<code>mod.rs:98</code>, <code>GuardianRejectionCircuitBreaker</code>):</p>
+<table><thead><tr><th>Constant</th><th>Value</th><th>Role</th></tr></thead><tbody><tr><td><code>MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN</code></td><td>3</td><td>3 consecutive denials within one turn → interrupt that turn</td></tr><tr><td><code>MAX_RECENT_AUTO_REVIEW_DENIALS_PER_TURN</code></td><td>10</td><td>10 denials within the recent window → interrupt</td></tr><tr><td><code>AUTO_REVIEW_DENIAL_WINDOW_SIZE</code></td><td>50</td><td>Sliding window size</td></tr></tbody></table>
+<p>When consecutive denials exceed the threshold, <code>InterruptTurn</code> stops the turn, avoiding meaninglessly burning tokens. This chapter has no such layer — it assumes review is one-shot and won&#x27;t loop.</p>
+</details>
+<details>
+<summary>4. Its place in the architecture: one ext crate + one event</summary>
+<p>In real Codex, Guardian is an <strong>extension</strong>, not a hard-coded part of core. <code>ext/guardian/src/lib.rs</code> implements it as a <code>ThreadLifecycleContributor</code>, installed into the registry via <code>ExtensionRegistryBuilder::thread_lifecycle_contributor</code>; it holds an <code>AgentSpawner</code> used to fork the reviewing sub-agent (<code>spawn_subagent</code>).</p>
+<p>Its outward-visible output is an event <code>GuardianAssessmentEvent</code> (<code>approvals.rs:178</code>), from which the frontend renders &quot;Guardian is reviewing / what risk it ruled / what the reason is&quot;:</p>
+<pre><code class="language-rust">pub struct GuardianAssessmentEvent {
+    pub id: String,
+    pub status: GuardianAssessmentStatus,   // InProgress / Approved / Denied / TimedOut / Aborted
+    pub risk_level: Option&lt;GuardianRiskLevel&gt;,
+    pub rationale: Option&lt;String&gt;,
+    pub action: GuardianAssessmentAction,    // Command / Execve / ApplyPatch / NetworkAccess / McpToolCall
+    ...
+}</code></pre>
+<p>This event travels precisely along <a href="../s10_sq_eq_protocol/README.en.html">s10</a>&#x27;s EQ (event queue). And that <code>action</code> enum shows Guardian reviews more than just shell commands — <code>ApplyPatch</code> (patches, see <a href="../s03_apply_patch/README.en.html">s03</a>), <code>NetworkAccess</code> (going out to the network), and <code>McpToolCall</code> (MCP tools, see <a href="../s15_mcp/README.en.html">s15</a>) are all within its review scope.</p>
+<p>The last point is also the most important: <strong>the user can always override Guardian.</strong> The real source has <code>AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX</code> — when a user manually approves an action that Guardian had denied, a developer message is injected telling the model &quot;the user has manually allowed it.&quot; Guardian keeps the gate; it is not a dictator.</p>
+</details>
+<h2 id="run">Run</h2>
+<pre><code class="language-bash">python s14_guardian/code.py --demo   # 不需要模型：5 条动作 → 风险档 + 自动决定
+python s14_guardian/code.py          # 交互模式：把你输入的命令喂给 guardian</code></pre>
+<p><code>--demo</code> is fully offline (<code>backend=mock</code>).</p>
+<h2 id="recap">Recap</h2>
+<ul><li>Guardian = an automatic risk assessor, wired in as an &quot;automatic approver&quot; slotted in before asking the user: low→allow, critical→deny, medium/high→escalate.</li><li>The four risk tiers <code>low/medium/high/critical</code> are the real variants of the source&#x27;s <code>GuardianRiskLevel</code>; the product <code>GuardianAssessment</code> is structured JSON.</li><li>The real Guardian is a <strong>reviewing-LLM sub-agent</strong> that forks a session, reads the transcript, and returns strict JSON, always fail-closed, with a circuit breaker to guard against running wild.</li><li>It is the most striking difference between Codex and Claude Code (⭐): using &quot;a second AI&quot; to keep the gate for an absent user, born to scale up autonomy when no one is watching.</li><li>It layers on top of approval (<a href="../s04_approval/README.en.html">s04</a>) / the sandbox (<a href="../s05_sandbox/README.en.html">s05</a>) without replacing them, and the user can always override it.</li><li><strong>Production-grade</strong>: insure the gatekeeping AI — fail-closed (timeout/crash/parse-failure all deny), circuit breaker (<code>MAX_CONSECUTIVE_*=3</code> to prevent idle spinning), strict JSON contract + timeout, and an honest admission that &quot;a same-source model might be fooled by the same injection&quot; (see the &quot;Production-grade&quot; section).</li><li>Next stop, <a href="../s15_mcp/README.en.html">s15 MCP: client + server</a>: hook the agent up to an external tool ecosystem — and Guardian&#x27;s <code>McpToolCall</code> review is reviewing exactly those external tools.</li></ul>
+<h2 id="think-it-over">Think it over</h2>
+<ol><li>Guardian uses &quot;a second AI&quot; to keep the gate for &quot;the first AI.&quot; But these two AIs are often the same vendor, same generation of model — if the first can be lured by some injection, will the second be fooled by the same trick? Under what premise does &quot;AI reviewing AI&quot; truly add safety, rather than just adding a layer of same-source blind spot?</li></ol>
+<ol><li>The real Guardian is always fail-closed: timeout/error/parse-failure all rule deny. This is right for safety, but inside CI — one review timeout blocks a deployment command that was perfectly fine. When &quot;better to over-kill&quot; collides with &quot;the pipeline must be green,&quot; how would you design a degradation strategy? In your scenario, which costs more — the cost of over-killing or the cost of letting something slip through?</li></ol>
+<ol><li>This chapter writes risk as deterministic rules; the real Guardian&#x27;s risk is judged live by a model, meaning <strong>the same command, two reviews, might give different tiers</strong>. For a safety layer that&#x27;s supposed to &quot;follow the rules,&quot; is this uncertainty a bug or a feature? Would you rather have a reviewer that occasionally misjudges but can understand context, or a rule table that&#x27;s forever consistent but only matches strings?</li></ol>
+<ol><li>Claude Code lets the user judge risk themselves; Codex dispatches an AI to judge for the user. The former respects human judgment but requires a human present; the latter frees the human but cedes the judgment to the model. When Guardian has blocked/allowed hundreds or thousands of commands for you and you&#x27;ve looked at not a single one, what is your &quot;trust&quot; in this system actually built on? And is that trust the same thing as your trust in Claude Code&#x27;s dialog?</li></ol>
+</main>
+<footer>本页由 <code>build_html.py</code> 从 Markdown 渲染生成。</footer>
+</body>
+</html>

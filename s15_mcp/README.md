@@ -1,5 +1,7 @@
 # s15: MCP — 客户端 + 服务端：能力不够就插，也能被别人插
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"MCP 是 agent 世界的标准插座：任何工具都能插进任何 agent，任何 agent 也能反过来插进别的 agent。"*
 
 [learn-codex 总览](../README.md) · [Guardian](../s14_guardian/) → **本章** → [Config 与 Profiles](../s16_config/)

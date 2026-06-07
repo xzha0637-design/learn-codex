@@ -1,5 +1,7 @@
 # s01: Agent Loop — 一个循环就够了
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"回合循环是所有 agent 的共同底座。Agency 来自模型，不来自循环。"*
 
 [learn-codex 总览](../README.md) · **回合循环** → [工具与分发](../s02_tool_use/)

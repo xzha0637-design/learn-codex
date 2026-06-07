@@ -1,5 +1,7 @@
 # s16: Config — 分层解析与命名 profile
 
+> 🌐 [English](README.en.md) · **中文**
+
 > *"一个开关切换一整套自主度：prod 上谨慎，草稿仓里放飞。"*
 
 [learn-codex 总览](../README.md) · [s15 MCP](../s15_mcp/) → **s16** → [s17 综合：迷你 Codex](../s17_comprehensive/)
